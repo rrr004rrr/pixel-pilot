@@ -4,7 +4,7 @@ gui.py — 視窗版自動化流程控制介面（含步驟編輯）
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import ttk, scrolledtext, filedialog, messagebox, simpledialog
 import threading
 import sys
 import json
@@ -49,7 +49,8 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int]:
 #  常數
 # ════════════════════════════════════════════════════════════
 
-STEPS_FILE = "steps.json"
+STEPS_FILE  = "steps.json"
+GROUPS_FILE = "groups.json"
 
 ACTIONS = [
     "find_and_click",
@@ -71,6 +72,7 @@ ACTION_LABELS = {
     "scroll":              "滾輪",
     "sleep":               "等待(秒)",
     "rename_pdf":          "重新命名PDF",
+    "run_group":           "執行群組",
 }
 ON_FAIL_OPTIONS       = ["stop", "skip", "retry"]
 ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次"]
@@ -94,6 +96,7 @@ _NEEDS_COORD      = {"move", "click_xy", "scroll"}
 _NEEDS_SCROLL     = {"scroll"}
 _NEEDS_CLICK_TYPE = {"click_xy"}
 _NEEDS_FOLDER     = {"rename_pdf"}
+_NEEDS_GROUP      = {"run_group"}
 
 
 # ════════════════════════════════════════════════════════════
@@ -110,6 +113,23 @@ def _empty_step(n: int) -> dict:
         "timeout":    10.0,
         "confidence": 0.8,
     }
+
+
+def load_groups() -> dict:
+    p = Path(GROUPS_FILE)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_groups(groups: dict):
+    Path(GROUPS_FILE).write_text(
+        json.dumps(groups, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def load_steps() -> list:
@@ -227,6 +247,24 @@ def _execute(step: dict) -> bool:
         return True
     elif action == "rename_pdf":
         return _rename_pdfs_in_folder(step.get("folder", ""))
+    elif action == "run_group":
+        group_name = step.get("group", "")
+        groups = load_groups()
+        if group_name not in groups:
+            print(f"  ❌ 找不到群組：{group_name}")
+            return False
+        group_steps = groups[group_name]
+        print(f"  📦 執行群組「{group_name}」（{len(group_steps)} 個步驟）")
+        for gs in group_steps:
+            if not gs.get("enabled", True):
+                continue
+            al = ACTION_LABELS.get(gs["action"], gs["action"])
+            print(f"\n  ├─ {gs['name']}  [{al}]")
+            if not _run_with_retry(gs):
+                print(f"  └─ ❌ 失敗")
+                return False
+            print(f"  └─ ✅")
+        return True
     elif action == "scroll":
         amount = int(step.get("scroll_amount", 3))
         direction = "向上" if amount > 0 else "向下"
@@ -369,6 +407,15 @@ class StepDialog(tk.Toplevel):
                      values=CLICK_TYPE_DISPLAY, state="readonly",
                      width=10).pack(side=tk.LEFT, padx=(4, 0))
 
+        # ── 可切換群組：群組選擇 ──
+        self._group_frame = tk.Frame(self)
+        tk.Label(self._group_frame, text="群組", width=10, anchor="e").pack(side=tk.LEFT)
+        self._group_var = tk.StringVar(value=s.get("group", ""))
+        _groups = load_groups()
+        self._group_cb = ttk.Combobox(self._group_frame, textvariable=self._group_var,
+                                      values=list(_groups.keys()), width=22)
+        self._group_cb.pack(side=tk.LEFT, padx=(4, 0))
+
         # ── 可切換群組：資料夾路徑 ──
         self._folder_frame = tk.Frame(self)
         tk.Label(self._folder_frame, text="PDF 資料夾", width=10, anchor="e").pack(side=tk.LEFT)
@@ -454,6 +501,12 @@ class StepDialog(tk.Toplevel):
         else:
             hide(self._folder_frame)
 
+        # 群組
+        if action in _NEEDS_GROUP:
+            show(self._group_frame)
+        else:
+            hide(self._group_frame)
+
         # 逾時 / 等待秒數
         if action in _NEEDS_TIMEOUT:
             self._timeout_label_var.set("等待秒數" if action == "sleep" else "逾時秒數")
@@ -495,7 +548,217 @@ class StepDialog(tk.Toplevel):
             "scroll_amount": int(self._scroll_amount.get() or 3),
             "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
             "folder":        self._folder.get().strip(),
+            "group":         self._group_var.get().strip(),
         }
+        self.destroy()
+
+
+# ════════════════════════════════════════════════════════════
+#  群組管理對話框
+# ════════════════════════════════════════════════════════════
+
+class GroupManagerDialog(tk.Toplevel):
+    """建立與編輯可重複使用的步驟群組"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("群組管理")
+        self.geometry("820x520")
+        self.minsize(700, 400)
+        self.grab_set()
+
+        self._groups: dict = load_groups()   # {name: [steps]}
+        self._current: str | None = None
+
+        self._build_ui()
+        self._refresh_group_list()
+
+    # ── 建構 UI ─────────────────────────────────────────────
+
+    def _build_ui(self):
+        # ── 左側：群組清單 ──
+        left = tk.LabelFrame(self, text="群組清單", padx=6, pady=4, width=190)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 4), pady=8)
+        left.pack_propagate(False)
+
+        self._listbox = tk.Listbox(left, selectmode="single", font=("", 10))
+        self._listbox.pack(fill=tk.BOTH, expand=True)
+        self._listbox.bind("<<ListboxSelect>>", self._on_group_select)
+
+        for text, cmd in [
+            ("＋ 新增群組",   self._add_group),
+            ("✎ 重新命名",   self._rename_group),
+            ("✕ 刪除群組",   self._delete_group),
+        ]:
+            tk.Button(left, text=text, command=cmd).pack(fill=tk.X, pady=1)
+
+        # ── 右側：群組內步驟 ──
+        right = tk.LabelFrame(self, text="群組內步驟（雙擊編輯）", padx=6, pady=4)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 8), pady=8)
+
+        step_ctrl = tk.Frame(right)
+        step_ctrl.pack(fill=tk.X, pady=(0, 4))
+        for text, cmd in [
+            ("＋ 新增", self._add_step),
+            ("✏ 編輯",  self._edit_step),
+            ("⧉ 複製",  self._copy_step),
+            ("✕ 刪除",  self._delete_step),
+            ("↑",       self._move_up),
+            ("↓",       self._move_down),
+        ]:
+            tk.Button(step_ctrl, text=text, width=7,
+                      command=cmd).pack(side=tk.LEFT, padx=2)
+
+        cols = ("#", "啟用", "步驟名稱", "動作")
+        self._tree = ttk.Treeview(right, columns=cols, show="headings", height=14)
+        col_cfg = {"#": (36, "center"), "啟用": (44, "center"),
+                   "步驟名稱": (220, "w"), "動作": (100, "center")}
+        for col, (w, anchor) in col_cfg.items():
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=w, anchor=anchor,
+                              stretch=(col == "步驟名稱"))
+        self._tree.pack(fill=tk.BOTH, expand=True)
+        self._tree.bind("<Double-1>", lambda _: self._edit_step())
+
+        tk.Button(self, text="💾 儲存並關閉", bg="#2980b9", fg="white", width=14,
+                  command=self._save_close).pack(pady=6)
+
+    # ── 群組清單 ────────────────────────────────────────────
+
+    def _refresh_group_list(self):
+        self._listbox.delete(0, tk.END)
+        self._group_names = list(self._groups.keys())
+        for name in self._group_names:
+            count = len(self._groups[name])
+            self._listbox.insert(tk.END, f"  {name}  ({count} 步)")
+
+    def _on_group_select(self, *_):
+        sel = self._listbox.curselection()
+        if not sel:
+            return
+        self._current = self._group_names[sel[0]]
+        self._refresh_step_tree()
+
+    def _add_group(self):
+        name = simpledialog.askstring("新增群組", "請輸入群組名稱：", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if name in self._groups:
+            messagebox.showwarning("已存在", f"群組「{name}」已存在", parent=self)
+            return
+        self._groups[name] = []
+        self._refresh_group_list()
+        idx = list(self._groups.keys()).index(name)
+        self._listbox.selection_set(idx)
+        self._current = name
+        self._refresh_step_tree()
+
+    def _rename_group(self):
+        if self._current is None:
+            return
+        new_name = simpledialog.askstring("重新命名", "新名稱：",
+                                          initialvalue=self._current, parent=self)
+        if not new_name or not new_name.strip() or new_name.strip() == self._current:
+            return
+        new_name = new_name.strip()
+        if new_name in self._groups:
+            messagebox.showwarning("已存在", f"「{new_name}」已存在", parent=self)
+            return
+        steps = self._groups.pop(self._current)
+        self._groups[new_name] = steps
+        self._current = new_name
+        self._refresh_group_list()
+
+    def _delete_group(self):
+        if self._current is None:
+            return
+        if messagebox.askyesno("確認刪除", f"確定刪除群組「{self._current}」？", parent=self):
+            del self._groups[self._current]
+            self._current = None
+            self._refresh_group_list()
+            self._refresh_step_tree()
+
+    # ── 步驟清單 ────────────────────────────────────────────
+
+    def _refresh_step_tree(self):
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+        if self._current is None:
+            return
+        for i, s in enumerate(self._groups.get(self._current, []), 1):
+            self._tree.insert("", tk.END, iid=str(i), values=(
+                f"{i:02d}",
+                "✔" if s.get("enabled", True) else "✘",
+                s["name"],
+                ACTION_LABELS.get(s["action"], s["action"]),
+            ))
+
+    def _selected_idx(self) -> int | None:
+        sel = self._tree.selection()
+        return int(sel[0]) - 1 if sel else None
+
+    def _add_step(self):
+        if self._current is None:
+            messagebox.showinfo("提示", "請先選擇或建立群組", parent=self)
+            return
+        dlg = StepDialog(self)
+        if dlg.result:
+            self._groups[self._current].append(dlg.result)
+            self._refresh_step_tree()
+            self._refresh_group_list()
+
+    def _edit_step(self):
+        idx = self._selected_idx()
+        if idx is None or self._current is None:
+            return
+        dlg = StepDialog(self, self._groups[self._current][idx])
+        if dlg.result:
+            self._groups[self._current][idx] = dlg.result
+            self._refresh_step_tree()
+
+    def _copy_step(self):
+        idx = self._selected_idx()
+        if idx is None or self._current is None:
+            return
+        import copy
+        self._groups[self._current].append(
+            copy.deepcopy(self._groups[self._current][idx]))
+        self._refresh_step_tree()
+        self._refresh_group_list()
+        n = len(self._groups[self._current])
+        self._tree.selection_set(str(n))
+
+    def _delete_step(self):
+        idx = self._selected_idx()
+        if idx is None or self._current is None:
+            return
+        name = self._groups[self._current][idx]["name"]
+        if messagebox.askyesno("確認刪除", f"刪除「{name}」？", parent=self):
+            self._groups[self._current].pop(idx)
+            self._refresh_step_tree()
+            self._refresh_group_list()
+
+    def _move_up(self):
+        idx = self._selected_idx()
+        steps = self._groups.get(self._current, [])
+        if idx is None or idx == 0:
+            return
+        steps[idx - 1], steps[idx] = steps[idx], steps[idx - 1]
+        self._refresh_step_tree()
+        self._tree.selection_set(str(idx))
+
+    def _move_down(self):
+        idx = self._selected_idx()
+        steps = self._groups.get(self._current, [])
+        if idx is None or idx >= len(steps) - 1:
+            return
+        steps[idx], steps[idx + 1] = steps[idx + 1], steps[idx]
+        self._refresh_step_tree()
+        self._tree.selection_set(str(idx + 2))
+
+    def _save_close(self):
+        save_groups(self._groups)
         self.destroy()
 
 
@@ -576,6 +839,9 @@ class App(tk.Tk):
         tk.Button(ctrl, text="💾 儲存", width=8,
                   bg="#2980b9", fg="white",
                   command=self._save).pack(side=tk.RIGHT)
+
+        tk.Button(ctrl, text="📦 群組管理", width=10,
+                  command=lambda: GroupManagerDialog(self)).pack(side=tk.RIGHT, padx=6)
 
         # ── 視窗選擇器 ──
         win_box = tk.LabelFrame(self, text="目標視窗（鎖定後只截該視窗範圍）",
