@@ -450,6 +450,8 @@ class StepDialog(tk.Toplevel):
                   command=self._browse).pack(side=tk.LEFT)
         tk.Button(_btn_row, text="✕ 移除",
                   command=self._remove_tmpl).pack(side=tk.LEFT, padx=6)
+        tk.Button(_btn_row, text="🔍 偵測預覽",
+                  command=self._preview).pack(side=tk.LEFT, padx=6)
         tk.Label(_btn_row, text="（可新增多張，任一符合即成功）",
                  fg="#888", font=("", 8)).pack(side=tk.LEFT)
 
@@ -654,6 +656,102 @@ class StepDialog(tk.Toplevel):
         sel = self._tmpl_listbox.curselection()
         if sel:
             self._tmpl_listbox.delete(sel[0])
+
+    def _preview(self):
+        """截圖 + 模板比對，用視窗顯示偵測位置與點擊落點。"""
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageTk
+
+        templates = list(self._tmpl_listbox.get(0, tk.END))
+        if not templates:
+            messagebox.showinfo("提示", "請先選擇模板圖片", parent=self)
+            return
+
+        conf         = float(self._conf.get() or 0.8)
+        offset_x     = int(self._offset_x.get() or 0)
+        offset_y     = int(self._offset_y.get() or 0)
+        color_center = self._click_color_var.get()
+
+        import pyautogui
+        screen_pil = pyautogui.screenshot(region=ac._capture_region)
+        screen_bgr = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
+
+        # 找最佳匹配
+        best = None  # (path, max_loc, w, h, val)
+        for path in templates:
+            try:
+                tmpl = ac._imread(path)
+                if tmpl is None:
+                    continue
+                h, w = tmpl.shape[:2]
+                res  = cv2.matchTemplate(screen_bgr, tmpl, cv2.TM_CCOEFF_NORMED)
+                _, val, _, loc = cv2.minMaxLoc(res)
+                if best is None or val > best[4]:
+                    best = (path, loc, w, h, val)
+            except Exception:
+                pass
+
+        if best is None:
+            messagebox.showerror("錯誤", "無法讀取模板圖片", parent=self)
+            return
+
+        _, max_loc, w, h, sim = best
+        scale = ac._dpi_scale()
+        rx    = ac._capture_region[0] if ac._capture_region else 0
+        ry    = ac._capture_region[1] if ac._capture_region else 0
+
+        if color_center:
+            raw_x, raw_y = ac._color_center(screen_bgr, max_loc, w, h)
+        else:
+            raw_x = max_loc[0] + w // 2
+            raw_y = max_loc[1] + h // 2
+
+        cx = int(raw_x / scale) + offset_x + rx
+        cy = int(raw_y / scale) + offset_y + ry
+
+        # 畫示意圖：放大截取區域，標記框 + 落點
+        MARGIN = 60
+        x0 = max(0, max_loc[0] - MARGIN)
+        y0 = max(0, max_loc[1] - MARGIN)
+        x1 = min(screen_bgr.shape[1], max_loc[0] + w + MARGIN)
+        y1 = min(screen_bgr.shape[0], max_loc[1] + h + MARGIN)
+        crop = screen_bgr[y0:y1, x0:x1].copy()
+
+        # 綠框 = 偵測區域
+        cv2.rectangle(crop,
+                      (max_loc[0] - x0, max_loc[1] - y0),
+                      (max_loc[0] - x0 + w, max_loc[1] - y0 + h),
+                      (0, 200, 0), 2)
+        # 紅十字 = 點擊落點（physical pixels）
+        px = raw_x - x0
+        py = raw_y - y0
+        cv2.drawMarker(crop, (px, py), (0, 0, 255),
+                       cv2.MARKER_CROSS, 24, 2)
+
+        # 放大 3 倍以便看清楚
+        ZOOM = 3
+        crop = cv2.resize(crop, (crop.shape[1] * ZOOM, crop.shape[0] * ZOOM),
+                          interpolation=cv2.INTER_NEAREST)
+
+        img_rgb  = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        pil_img  = Image.fromarray(img_rgb)
+
+        win = tk.Toplevel(self)
+        win.title("偵測預覽")
+        win.grab_set()
+
+        photo = ImageTk.PhotoImage(pil_img)
+        tk.Label(win, image=photo).pack(padx=8, pady=6)
+        win._photo = photo  # 防止 GC
+
+        status = "✅ 會點擊" if sim >= conf else f"❌ 低於門檻（{conf:.0%}），不會點擊"
+        tk.Label(win,
+                 text=f"相似度：{sim:.0%}   點擊落點：({cx}, {cy})   {status}",
+                 pady=4).pack()
+        tk.Label(win, text="■ 綠框 = 偵測區域    ✚ 紅十字 = 點擊落點",
+                 fg="#555", font=("", 9)).pack()
+        tk.Button(win, text="關閉", command=win.destroy).pack(pady=6)
 
     def _browse_folder(self):
         path = filedialog.askdirectory(title="選擇 PDF 資料夾")
