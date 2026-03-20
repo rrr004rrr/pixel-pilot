@@ -71,9 +71,20 @@ ACTION_LABELS = {
     "scroll":              "滾輪",
     "sleep":               "等待(秒)",
 }
-ON_FAIL_OPTIONS = ["stop", "skip", "retry"]
-CLICK_TYPES = ["left", "right", "double"]
-CLICK_TYPE_LABELS = {"left": "左鍵", "right": "右鍵", "double": "雙擊"}
+ON_FAIL_OPTIONS       = ["stop", "skip", "retry"]
+ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次"]
+ON_FAIL_TO_DISPLAY    = dict(zip(ON_FAIL_OPTIONS, ON_FAIL_DISPLAY))
+DISPLAY_TO_ON_FAIL    = dict(zip(ON_FAIL_DISPLAY, ON_FAIL_OPTIONS))
+
+CLICK_TYPES           = ["left", "right", "double"]
+CLICK_TYPE_LABELS     = {"left": "左鍵", "right": "右鍵", "double": "雙擊"}
+CLICK_TYPE_DISPLAY    = ["左鍵", "右鍵", "雙擊"]
+DISPLAY_TO_CLICK_TYPE = dict(zip(CLICK_TYPE_DISPLAY, CLICK_TYPES))
+
+# 動作：中文顯示 ↔ 內部 key
+ACTION_DISPLAY        = list(ACTION_LABELS.values())          # 中文清單（combobox 用）
+DISPLAY_TO_ACTION     = {v: k for k, v in ACTION_LABELS.items()}  # 中文 → key
+ACTION_TO_DISPLAY     = ACTION_LABELS                          # key → 中文（同 ACTION_LABELS）
 
 # 各動作需要的欄位群組
 _NEEDS_TEMPLATE = {"find_and_click", "wait_for_image", "wait_for_image_gone", "image_exists"}
@@ -243,9 +254,10 @@ class StepDialog(tk.Toplevel):
         # ── 固定欄位：動作 ──
         f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
         tk.Label(f, text="動作", width=10, anchor="e").pack(side=tk.LEFT)
-        self._action_var = tk.StringVar(value=s.get("action", "find_and_click"))
+        self._action_var = tk.StringVar(
+            value=ACTION_TO_DISPLAY.get(s.get("action", "find_and_click"), "圖片點擊"))
         cb = ttk.Combobox(f, textvariable=self._action_var,
-                          values=ACTIONS, state="readonly", width=22)
+                          values=ACTION_DISPLAY, state="readonly", width=14)
         cb.pack(side=tk.LEFT, padx=(4, 0))
         cb.bind("<<ComboboxSelected>>", self._on_action_change)
 
@@ -293,9 +305,10 @@ class StepDialog(tk.Toplevel):
         # ── 可切換群組：點擊方式 ──
         self._click_type_frame = tk.Frame(self)
         tk.Label(self._click_type_frame, text="點擊方式", width=10, anchor="e").pack(side=tk.LEFT)
-        self._click_type_var = tk.StringVar(value=s.get("click_type", "left"))
+        self._click_type_var = tk.StringVar(
+            value=CLICK_TYPE_LABELS.get(s.get("click_type", "left"), "左鍵"))
         ttk.Combobox(self._click_type_frame, textvariable=self._click_type_var,
-                     values=CLICK_TYPES, state="readonly",
+                     values=CLICK_TYPE_DISPLAY, state="readonly",
                      width=10).pack(side=tk.LEFT, padx=(4, 0))
 
         # ── 可切換群組：逾時 / 等待秒數 ──
@@ -312,9 +325,10 @@ class StepDialog(tk.Toplevel):
         # ── 固定欄位：失敗行為 ──
         f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
         tk.Label(f, text="失敗行為", width=10, anchor="e").pack(side=tk.LEFT)
-        self._on_fail_var = tk.StringVar(value=s.get("on_fail", "stop"))
+        self._on_fail_var = tk.StringVar(
+            value=ON_FAIL_TO_DISPLAY.get(s.get("on_fail", "stop"), "停止"))
         ttk.Combobox(f, textvariable=self._on_fail_var,
-                     values=ON_FAIL_OPTIONS, state="readonly",
+                     values=ON_FAIL_DISPLAY, state="readonly",
                      width=10).pack(side=tk.LEFT, padx=(4, 0))
 
         # ── 固定欄位：啟用 ──
@@ -335,7 +349,7 @@ class StepDialog(tk.Toplevel):
     # ── 動態顯示/隱藏欄位群組 ──────────────────────────────
 
     def _on_action_change(self, *_):
-        action = self._action_var.get()
+        action = DISPLAY_TO_ACTION.get(self._action_var.get(), self._action_var.get())
         PAD = {"fill": tk.X, "padx": 10, "pady": 3}
 
         def show(frame): frame.pack(PAD)
@@ -391,16 +405,16 @@ class StepDialog(tk.Toplevel):
     def _ok(self):
         self.result = {
             "name":          self._name.get().strip() or "未命名",
-            "action":        self._action_var.get(),
+            "action":        DISPLAY_TO_ACTION.get(self._action_var.get(), self._action_var.get()),
             "template":      self._tmpl.get().strip(),
-            "on_fail":       self._on_fail_var.get(),
+            "on_fail":       DISPLAY_TO_ON_FAIL.get(self._on_fail_var.get(), self._on_fail_var.get()),
             "enabled":       self._enabled_var.get(),
             "timeout":       float(self._timeout.get() or 10),
             "confidence":    float(self._conf.get() or 0.8),
             "x":             int(self._x.get() or 0),
             "y":             int(self._y.get() or 0),
             "scroll_amount": int(self._scroll_amount.get() or 3),
-            "click_type":    self._click_type_var.get(),
+            "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
         }
         self.destroy()
 
