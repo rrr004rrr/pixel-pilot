@@ -565,6 +565,7 @@ class App(tk.Tk):
         for text, cmd in [
             ("＋ 新增", self._add_step),
             ("✏ 編輯", self._edit_step),
+            ("⧉ 複製", self._copy_step),
             ("✕ 刪除", self._delete_step),
             ("↑ 上移", self._move_up),
             ("↓ 下移", self._move_down),
@@ -696,6 +697,15 @@ class App(tk.Tk):
             self._steps[idx] = dlg.result
             self._refresh_tree()
             self._tree.selection_set(str(idx + 1))
+
+    def _copy_step(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        import copy
+        self._steps.append(copy.deepcopy(self._steps[idx]))
+        self._refresh_tree()
+        self._tree.selection_set(str(len(self._steps)))  # 選中最後一列
 
     def _delete_step(self):
         idx = self._selected_index()
