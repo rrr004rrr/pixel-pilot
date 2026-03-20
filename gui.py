@@ -251,8 +251,9 @@ def _execute(step: dict) -> bool:
     x       = int(step.get("x", 0))
     y       = int(step.get("y", 0))
 
-    offset_x = int(step.get("offset_x", 0))
-    offset_y = int(step.get("offset_y", 0))
+    offset_x    = int(step.get("offset_x", 0))
+    offset_y    = int(step.get("offset_y", 0))
+    color_center = bool(step.get("click_color_center", False))
 
     if action == "find_and_click":
         if len(templates) > 1:
@@ -264,7 +265,8 @@ def _execute(step: dict) -> bool:
             print(f"  🖱️  左鍵 點擊 ({cx + offset_x}, {cy + offset_y})")
             return True
         return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout,
-                                      offset_x=offset_x, offset_y=offset_y))
+                                      offset_x=offset_x, offset_y=offset_y,
+                                      click_color_center=color_center))
     elif action == "wait_for_image":
         if len(templates) > 1:
             return _find_any(templates, conf, timeout) is not None
@@ -475,8 +477,15 @@ class StepDialog(tk.Toplevel):
         self._offset_y.delete(0, tk.END)
         self._offset_y.insert(0, str(s.get("offset_y", 0)))
         self._offset_y.pack(side=tk.LEFT)
-        tk.Label(self._offset_frame, text="（從圖片中心偏移）",
+        tk.Label(self._offset_frame, text="（從偵測中心偏移）",
                  fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=4)
+
+        # ── 可切換群組：點擊顏色重心 ──
+        self._color_center_frame = tk.Frame(self)
+        self._click_color_var = tk.BooleanVar(value=s.get("click_color_center", False))
+        tk.Checkbutton(self._color_center_frame,
+                       text="自動點擊有顏色的位置（忽略白色背景）",
+                       variable=self._click_color_var).pack(side=tk.LEFT, padx=(80, 0))
 
         # ── 可切換群組：座標 X / Y ──
         self._coord_frame = tk.Frame(self)
@@ -605,11 +614,13 @@ class StepDialog(tk.Toplevel):
         else:
             hide(self._folder_frame)
 
-        # 點擊偏移
+        # 點擊偏移 + 顏色重心
         if action in _NEEDS_OFFSET:
             show(self._offset_frame)
+            show(self._color_center_frame)
         else:
             hide(self._offset_frame)
+            hide(self._color_center_frame)
 
         # 群組
         if action in _NEEDS_GROUP:
@@ -662,8 +673,9 @@ class StepDialog(tk.Toplevel):
             "confidence":    float(self._conf.get() or 0.8),
             "x":             int(self._x.get() or 0),
             "y":             int(self._y.get() or 0),
-            "offset_x":      int(self._offset_x.get() or 0),
-            "offset_y":      int(self._offset_y.get() or 0),
+            "offset_x":           int(self._offset_x.get() or 0),
+            "offset_y":           int(self._offset_y.get() or 0),
+            "click_color_center": self._click_color_var.get(),
             "scroll_amount": int(self._scroll_amount.get() or 3),
             "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
             "folder":        self._folder.get().strip(),

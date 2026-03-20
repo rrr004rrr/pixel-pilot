@@ -40,14 +40,16 @@ def find_and_click(
     offset_y: int = 0,
     wait_timeout: float = 10.0,
     debug: bool = False,
+    click_color_center: bool = False,
 ) -> tuple | None:
     """
     在螢幕上找到指定圖示並點擊。
     click_type: "left" / "right" / "double"
+    click_color_center: True 時點有顏色的重心而非幾何中心
     回傳：找到時 (x, y)，找不到 None
     """
     pos = find_only(template_path, confidence, offset_x, offset_y,
-                    wait_timeout, debug)
+                    wait_timeout, debug, click_color_center)
     if pos is None:
         return None
 
@@ -70,9 +72,11 @@ def find_only(
     offset_y: int = 0,
     wait_timeout: float = 10.0,
     debug: bool = False,
+    click_color_center: bool = False,
 ) -> tuple | None:
     """
     找到圖示位置但不點擊，回傳 (x, y) 中心座標。
+    click_color_center: True 時回傳有顏色像素的重心而非幾何中心。
     會持續等待直到超時。
     """
     _check_file(template_path)
@@ -96,11 +100,20 @@ def find_only(
             scale = _dpi_scale()
             rx = _capture_region[0] if _capture_region else 0
             ry = _capture_region[1] if _capture_region else 0
-            # 截圖座標（實體像素）÷ scale → 邏輯像素，再加 region offset（已是邏輯像素）
-            cx = int((max_loc[0] + w // 2) / scale) + offset_x + rx
-            cy = int((max_loc[1] + h // 2) / scale) + offset_y + ry
+
+            if click_color_center:
+                raw_x, raw_y = _color_center(screen, max_loc, w, h)
+                note = "顏色重心"
+            else:
+                raw_x = max_loc[0] + w // 2
+                raw_y = max_loc[1] + h // 2
+                note = ""
+
+            cx = int(raw_x / scale) + offset_x + rx
+            cy = int(raw_y / scale) + offset_y + ry
             print(f"  ✅ 找到 {Path(template_path).name}  相似度 {max_val:.0%}  "
                   f"位置 ({cx}, {cy})"
+                  + (f"  [{note}]" if note else "")
                   + (f"  DPI×{scale:.2f}" if scale != 1.0 else ""))
             if debug:
                 cv2.destroyAllWindows()
@@ -246,6 +259,23 @@ def _check_file(path: str):
             f"找不到圖片檔案：{path}\n"
             f"請確認已把截圖放在 templates/ 資料夾"
         )
+
+
+def _color_center(screen_bgr, top_left: tuple, w: int, h: int,
+                  white_thresh: int = 230) -> tuple[int, int]:
+    """
+    在匹配區域內找出非白色像素的重心。
+    若全為白色則回退至幾何中心。
+    white_thresh: 三個 channel 都 >= 此值才視為白色。
+    """
+    x0, y0 = top_left
+    region = screen_bgr[y0:y0 + h, x0:x0 + w]          # (h, w, 3) BGR
+    # 任一 channel 低於門檻 → 有顏色
+    mask = np.any(region < white_thresh, axis=2)
+    if not mask.any():
+        return (x0 + w // 2, y0 + h // 2)               # 全白，退回幾何中心
+    ys, xs = np.where(mask)
+    return (int(xs.mean()) + x0, int(ys.mean()) + y0)
 
 
 def _imread(path: str):
