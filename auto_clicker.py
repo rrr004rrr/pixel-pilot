@@ -76,7 +76,7 @@ def find_only(
     會持續等待直到超時。
     """
     _check_file(template_path)
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    template = _imread(template_path)
     if template is None:
         print(f"❌ 無法讀取圖片：{template_path}")
         return None
@@ -119,7 +119,7 @@ def image_exists(template_path: str, confidence: float = 0.8) -> bool:
     快速判斷圖示當前是否在螢幕上，不等待，立即回傳 True/False。
     """
     _check_file(template_path)
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    template = _imread(template_path)
     if template is None:
         return False
     screen = _screenshot()
@@ -174,7 +174,7 @@ def find_all(
     回傳所有 (x, y) 座標列表。
     """
     _check_file(template_path)
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    template = _imread(template_path)
     screen = _screenshot()
     h, w = template.shape[:2]
 
@@ -230,6 +230,11 @@ def _check_file(path: str):
             f"找不到圖片檔案：{path}\n"
             f"請確認已把截圖放在 templates/ 資料夾"
         )
+
+
+def _imread(path: str):
+    """讀取圖片，支援中文路徑（cv2.imread 在 Windows 上不支援 Unicode）。"""
+    return cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
 def _show_debug(screen, template, max_loc, max_val, confidence):
