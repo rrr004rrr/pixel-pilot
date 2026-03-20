@@ -975,6 +975,7 @@ class App(tk.Tk):
 
         self._tree.pack(fill=tk.X)
         self._tree.bind("<Double-1>", lambda _: self._edit_step())
+        self._tree.bind("<space>", lambda _: self._run_single_step())
 
         self._tree.tag_configure("waiting",  background="white")
         self._tree.tag_configure("running",  background="#fff9c4")
@@ -1139,6 +1140,36 @@ class App(tk.Tk):
         self.after(2000, lambda: self._status.config(text="就緒"))
 
     # ── 執行控制 ────────────────────────────────────────────
+
+    def _run_single_step(self):
+        idx = self._selected_index()
+        if idx is None or self._running:
+            return
+        step = self._steps[idx]
+        orig_idx = idx + 1
+
+        self._set_row_status(orig_idx, "⏳ 執行中", "running")
+        self._status.config(text=f"單步執行 {orig_idx}…")
+
+        def _worker():
+            old_stdout = sys.stdout
+            sys.stdout = _StdoutRedirector(self._log)
+            try:
+                action_label = ACTION_LABELS.get(step["action"], step["action"])
+                print(f"\n{'─'*55}")
+                print(f"  ▶ 單步執行  步驟 {orig_idx:02d}  {step['name']}  [{action_label}]")
+                print(f"{'─'*55}")
+                success = _run_with_retry(step)
+                if success:
+                    self.after(0, self._set_row_status, orig_idx, "✅ 成功", "success")
+                    self.after(0, self._status.config, {"text": "就緒"})
+                else:
+                    self.after(0, self._set_row_status, orig_idx, "❌ 失敗", "failed")
+                    self.after(0, self._status.config, {"text": f"步驟 {orig_idx} 失敗"})
+            finally:
+                sys.stdout = old_stdout
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_start(self):
         if self._running:
