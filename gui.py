@@ -165,10 +165,14 @@ def _tmpl_display(step: dict) -> str:
     return f"[{len(names)} 張] " + " / ".join(names)
 
 
+DOWNLOAD_PDF_NAME = "TodoNow • 让工作快起来.pdf"
+
+
 def _rename_pdfs_in_folder(folder: str) -> bool:
     """
-    掃描資料夾內所有 PDF，擷取第一行文字作為新檔名並重新命名。
-    回傳 True = 至少成功處理一個；False = 沒有 PDF 或全部失敗。
+    找到固定下載名稱的 PDF，擷取第一行文字作為新檔名並重新命名。
+    先改成暫存亂數名稱，確認目標不存在後再改成最終名稱。
+    回傳 True = 成功；False = 找不到檔案或失敗。
     """
     try:
         import pdfplumber
@@ -176,59 +180,47 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
         print("  ❌ 缺少套件，請執行：pip install pdfplumber")
         return False
 
-    import re
+    import re, uuid
     folder_path = Path(folder)
     if not folder_path.exists():
         print(f"  ❌ 找不到資料夾：{folder}")
         return False
 
-    # Windows 檔名不允許的字元
-    _INVALID = re.compile(r'[\\/:*?"<>|]')
-
-    pdfs = list(folder_path.glob("*.pdf"))
-    if not pdfs:
-        print(f"  ⚠️  資料夾內沒有 PDF：{folder}")
+    pdf_path = folder_path / DOWNLOAD_PDF_NAME
+    if not pdf_path.exists():
+        print(f"  ❌ 找不到檔案：{DOWNLOAD_PDF_NAME}")
         return False
 
-    import uuid
+    _INVALID = re.compile(r'[\\/:*?"<>|]')
 
-    # 第一步：讀取所有 PDF 的目標名稱，並全部先改成暫存亂數名
-    # 這樣即使 A.pdf 的目標剛好是 B.pdf，也不會互相衝突
-    jobs = []  # [(tmp_path, original_name, new_path)]
-    for pdf_path in pdfs:
-        try:
-            with pdfplumber.open(str(pdf_path)) as pdf:
-                text = pdf.pages[0].extract_text() or ""
-            first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
-            if not first_line:
-                print(f"  ⚠️  無法擷取文字，略過：{pdf_path.name}")
-                continue
-            new_name = _INVALID.sub("_", first_line) + ".pdf"
-            new_path = pdf_path.parent / new_name
-            tmp_path = pdf_path.parent / f"_tmp_{uuid.uuid4().hex}.pdf"
-            pdf_path.rename(tmp_path)
-            jobs.append((tmp_path, pdf_path.name, new_path))
-        except Exception as e:
-            print(f"  ❌ {pdf_path.name}（讀取/暫存失敗）：{e}")
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+        first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
+        if not first_line:
+            print(f"  ❌ 無法擷取文字：{DOWNLOAD_PDF_NAME}")
+            return False
 
-    # 第二步：全部暫存名都就位後，再改成目標名稱
-    success = 0
-    for tmp_path, original_name, new_path in jobs:
-        try:
-            if new_path == tmp_path or (not new_path.exists()):
-                tmp_path.rename(new_path)
-                print(f"  ✅ {original_name}")
-                print(f"     → {new_path.name}")
-                success += 1
-            else:
-                # 目標已存在（非本批次的舊檔），還原原名後略過
-                tmp_path.rename(tmp_path.parent / original_name)
-                print(f"  ⚠️  目標已存在，略過：{new_path.name}")
-        except Exception as e:
-            print(f"  ❌ {original_name}（改名失敗）：{e}")
+        new_name = _INVALID.sub("_", first_line) + ".pdf"
+        new_path = folder_path / new_name
 
-    print(f"\n  📄 完成：{success}/{len(pdfs)} 個 PDF 重新命名")
-    return success > 0
+        # 先改成亂數暫存名，再改成目標名稱
+        tmp_path = folder_path / f"_tmp_{uuid.uuid4().hex}.pdf"
+        pdf_path.rename(tmp_path)
+
+        if new_path.exists():
+            tmp_path.rename(pdf_path)  # 還原
+            print(f"  ⚠️  目標已存在，略過：{new_name}")
+            return False
+
+        tmp_path.rename(new_path)
+        print(f"  ✅ {DOWNLOAD_PDF_NAME}")
+        print(f"     → {new_name}")
+        return True
+
+    except Exception as e:
+        print(f"  ❌ {DOWNLOAD_PDF_NAME}：{e}")
+        return False
 
 
 def _find_any(templates: list, confidence: float, timeout: float):
