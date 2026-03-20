@@ -864,7 +864,8 @@ class App(tk.Tk):
         self._steps: list[dict] = load_steps()
         self._stop_event = threading.Event()
         self._running = False
-        self._loop_var = tk.BooleanVar(value=False)   # 循環執行
+        self._loop_var   = tk.BooleanVar(value=False)  # 循環執行
+        self._loop_count = tk.IntVar(value=0)          # 0 = 無限
         self._hwnd: int | None = None          # 選定視窗的 HWND
         self._win_map: dict[str, int] = {}     # 顯示名稱 → hwnd
 
@@ -907,7 +908,10 @@ class App(tk.Tk):
         self._status.pack(side=tk.LEFT)
 
         tk.Checkbutton(run_box, text="循環執行",
-                       variable=self._loop_var).pack(side=tk.LEFT, padx=(8, 0))
+                       variable=self._loop_var).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Spinbox(run_box, from_=0, to=9999, width=5,
+                   textvariable=self._loop_count).pack(side=tk.LEFT)
+        tk.Label(run_box, text="次（0=無限）", fg="#555").pack(side=tk.LEFT, padx=(2, 4))
 
         # 編輯群組
         edit_box = tk.LabelFrame(ctrl, text="步驟管理", padx=6, pady=2)
@@ -1205,8 +1209,9 @@ class App(tk.Tk):
         old_stdout = sys.stdout
         sys.stdout = _StdoutRedirector(self._log)
         try:
-            loop_count = 0
-            loop_mode = self._loop_var.get()
+            loop_count  = 0
+            loop_mode   = self._loop_var.get()
+            loop_target = self._loop_count.get()  # 0 = 無限
 
             while True:
                 loop_count += 1
@@ -1217,8 +1222,9 @@ class App(tk.Tk):
                 total = len(active)
 
                 if loop_mode:
+                    suffix = f"/ {loop_target}" if loop_target > 0 else "無限"
                     print(f"\n{'╔'+'═'*53}")
-                    print(f"  🔁 第 {loop_count} 輪  （共 {total} 個步驟）"
+                    print(f"  🔁 第 {loop_count} 輪 {suffix}  （共 {total} 個步驟）"
                           f"  ⚠️ 緊急停止：滑鼠移到左上角")
                     print(f"{'╚'+'═'*53}\n")
                 else:
@@ -1271,10 +1277,13 @@ class App(tk.Tk):
                         print(f"  ✅ 全部步驟執行完畢！")
                     print(f"{'═'*55}")
 
-                    if not loop_mode or self._stop_event.is_set():
+                    reached_target = loop_mode and loop_target > 0 and loop_count >= loop_target
+                    if not loop_mode or self._stop_event.is_set() or reached_target:
                         self.after(0, self._status.config, {"text": "✅ 完成"})
                         break
                     # 循環模式：繼續下一輪
+                    self.after(0, self._status.config,
+                               {"text": f"第 {loop_count}/{loop_target if loop_target else '∞'} 輪完成"})
                     continue
 
                 # 有 break（步驟失敗或手動停止）
