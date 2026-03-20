@@ -56,16 +56,31 @@ ACTIONS = [
     "wait_for_image",
     "wait_for_image_gone",
     "image_exists",
+    "move",
+    "click_xy",
+    "scroll",
     "sleep",
 ]
 ACTION_LABELS = {
-    "find_and_click":    "點擊",
-    "wait_for_image":    "等待出現",
+    "find_and_click":      "圖片點擊",
+    "wait_for_image":      "等待出現",
     "wait_for_image_gone": "等待消失",
-    "image_exists":      "確認存在",
-    "sleep":             "等待(秒)",
+    "image_exists":        "確認存在",
+    "move":                "移動滑鼠",
+    "click_xy":            "座標點擊",
+    "scroll":              "滾輪",
+    "sleep":               "等待(秒)",
 }
 ON_FAIL_OPTIONS = ["stop", "skip", "retry"]
+CLICK_TYPES = ["left", "right", "double"]
+CLICK_TYPE_LABELS = {"left": "左鍵", "right": "右鍵", "double": "雙擊"}
+
+# 各動作需要的欄位群組
+_NEEDS_TEMPLATE = {"find_and_click", "wait_for_image", "wait_for_image_gone", "image_exists"}
+_NEEDS_TIMEOUT  = {"find_and_click", "wait_for_image", "wait_for_image_gone", "sleep"}
+_NEEDS_COORD    = {"move", "click_xy", "scroll"}
+_NEEDS_SCROLL   = {"scroll"}
+_NEEDS_CLICK_TYPE = {"click_xy"}
 
 
 # ════════════════════════════════════════════════════════════
@@ -106,11 +121,14 @@ def save_steps(steps: list):
 # ════════════════════════════════════════════════════════════
 
 def _execute(step: dict) -> bool:
+    import pyautogui
     action  = step["action"]
     tmpl    = step.get("template", "")
     conf    = float(step.get("confidence", 0.8))
     timeout = float(step.get("timeout", 10.0))
     name    = step.get("name", action)
+    x       = int(step.get("x", 0))
+    y       = int(step.get("y", 0))
 
     if action == "find_and_click":
         return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout))
@@ -124,6 +142,31 @@ def _execute(step: dict) -> bool:
         return ok
     elif action == "sleep":
         ac.sleep(timeout, name)
+        return True
+    elif action == "move":
+        pyautogui.moveTo(x, y)
+        print(f"  🖱️  移動到 ({x}, {y})")
+        return True
+    elif action == "click_xy":
+        click_type = step.get("click_type", "left")
+        if click_type == "right":
+            pyautogui.rightClick(x, y)
+        elif click_type == "double":
+            pyautogui.doubleClick(x, y)
+        else:
+            pyautogui.click(x, y)
+        label = CLICK_TYPE_LABELS.get(click_type, click_type)
+        print(f"  🖱️  {label} 點擊 ({x}, {y})")
+        return True
+    elif action == "scroll":
+        amount = int(step.get("scroll_amount", 3))
+        direction = "向上" if amount > 0 else "向下"
+        if x or y:
+            pyautogui.scroll(amount, x=x, y=y)
+            print(f"  🖱️  滾輪 {direction} {abs(amount)} 格，位置 ({x}, {y})")
+        else:
+            pyautogui.scroll(amount)
+            print(f"  🖱️  滾輪 {direction} {abs(amount)} 格（目前滑鼠位置）")
         return True
     return False
 
@@ -178,7 +221,7 @@ class _StdoutRedirector:
 # ════════════════════════════════════════════════════════════
 
 class StepDialog(tk.Toplevel):
-    """新增 / 編輯步驟 Modal 對話框"""
+    """新增 / 編輯步驟 Modal 對話框（欄位依動作動態顯示）"""
 
     def __init__(self, parent, step: dict | None = None):
         super().__init__(parent)
@@ -188,16 +231,16 @@ class StepDialog(tk.Toplevel):
         self.result = None
 
         s = step.copy() if step else _empty_step(1)
-        PAD = {"padx": 10, "pady": 4}
+        PAD = {"padx": 10, "pady": 3}
 
-        # 名稱
+        # ── 固定欄位：名稱 ──
         f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
         tk.Label(f, text="名稱", width=10, anchor="e").pack(side=tk.LEFT)
         self._name = tk.Entry(f, width=28)
         self._name.insert(0, s.get("name", ""))
         self._name.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 動作
+        # ── 固定欄位：動作 ──
         f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
         tk.Label(f, text="動作", width=10, anchor="e").pack(side=tk.LEFT)
         self._action_var = tk.StringVar(value=s.get("action", "find_and_click"))
@@ -206,34 +249,67 @@ class StepDialog(tk.Toplevel):
         cb.pack(side=tk.LEFT, padx=(4, 0))
         cb.bind("<<ComboboxSelected>>", self._on_action_change)
 
-        # 模板檔案
-        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
-        tk.Label(f, text="模板檔案", width=10, anchor="e").pack(side=tk.LEFT)
-        self._tmpl = tk.Entry(f, width=24)
+        # ── 可切換群組：模板 ──
+        self._tmpl_frame = tk.Frame(self)
+        tk.Label(self._tmpl_frame, text="模板檔案", width=10, anchor="e").pack(side=tk.LEFT)
+        self._tmpl = tk.Entry(self._tmpl_frame, width=24)
         self._tmpl.insert(0, s.get("template", ""))
         self._tmpl.pack(side=tk.LEFT, padx=(4, 4))
-        tk.Button(f, text="瀏覽…", command=self._browse).pack(side=tk.LEFT)
+        tk.Button(self._tmpl_frame, text="瀏覽…", command=self._browse).pack(side=tk.LEFT)
 
-        # 相似度
-        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
-        tk.Label(f, text="相似度", width=10, anchor="e").pack(side=tk.LEFT)
-        self._conf = tk.Spinbox(f, from_=0.10, to=1.00, increment=0.05,
-                                format="%.2f", width=7)
+        # ── 可切換群組：相似度 ──
+        self._conf_frame = tk.Frame(self)
+        tk.Label(self._conf_frame, text="相似度", width=10, anchor="e").pack(side=tk.LEFT)
+        self._conf = tk.Spinbox(self._conf_frame, from_=0.10, to=1.00,
+                                increment=0.05, format="%.2f", width=7)
         self._conf.delete(0, tk.END)
         self._conf.insert(0, str(s.get("confidence", 0.8)))
         self._conf.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 等待秒數 / 逾時秒數
-        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        # ── 可切換群組：座標 X / Y ──
+        self._coord_frame = tk.Frame(self)
+        tk.Label(self._coord_frame, text="座標 X", width=10, anchor="e").pack(side=tk.LEFT)
+        self._x = tk.Entry(self._coord_frame, width=7)
+        self._x.insert(0, str(s.get("x", 0)))
+        self._x.pack(side=tk.LEFT, padx=(4, 12))
+        tk.Label(self._coord_frame, text="Y", width=2, anchor="e").pack(side=tk.LEFT)
+        self._y = tk.Entry(self._coord_frame, width=7)
+        self._y.insert(0, str(s.get("y", 0)))
+        self._y.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(self._coord_frame, text="  (0,0 = 目前位置)",
+                 fg="#888").pack(side=tk.LEFT, padx=4)
+
+        # ── 可切換群組：滾動量 ──
+        self._scroll_frame = tk.Frame(self)
+        tk.Label(self._scroll_frame, text="滾動量", width=10, anchor="e").pack(side=tk.LEFT)
+        self._scroll_amount = tk.Spinbox(self._scroll_frame, from_=-20, to=20,
+                                         increment=1, width=5)
+        self._scroll_amount.delete(0, tk.END)
+        self._scroll_amount.insert(0, str(s.get("scroll_amount", 3)))
+        self._scroll_amount.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(self._scroll_frame, text="格（正數=向上，負數=向下）",
+                 fg="#888").pack(side=tk.LEFT, padx=4)
+
+        # ── 可切換群組：點擊方式 ──
+        self._click_type_frame = tk.Frame(self)
+        tk.Label(self._click_type_frame, text="點擊方式", width=10, anchor="e").pack(side=tk.LEFT)
+        self._click_type_var = tk.StringVar(value=s.get("click_type", "left"))
+        ttk.Combobox(self._click_type_frame, textvariable=self._click_type_var,
+                     values=CLICK_TYPES, state="readonly",
+                     width=10).pack(side=tk.LEFT, padx=(4, 0))
+
+        # ── 可切換群組：逾時 / 等待秒數 ──
+        self._timeout_frame = tk.Frame(self)
         self._timeout_label_var = tk.StringVar()
-        tk.Label(f, textvariable=self._timeout_label_var,
+        tk.Label(self._timeout_frame, textvariable=self._timeout_label_var,
                  width=10, anchor="e").pack(side=tk.LEFT)
-        self._timeout = tk.Spinbox(f, from_=0, to=600, increment=1, width=7)
+        self._timeout = tk.Spinbox(self._timeout_frame, from_=0, to=600,
+                                   increment=1, width=7)
         self._timeout.delete(0, tk.END)
         self._timeout.insert(0, str(int(s.get("timeout", 10))))
         self._timeout.pack(side=tk.LEFT, padx=(4, 0))
 
-        # 失敗行為
+        # ── 固定欄位：失敗行為 ──
         f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
         tk.Label(f, text="失敗行為", width=10, anchor="e").pack(side=tk.LEFT)
         self._on_fail_var = tk.StringVar(value=s.get("on_fail", "stop"))
@@ -241,15 +317,14 @@ class StepDialog(tk.Toplevel):
                      values=ON_FAIL_OPTIONS, state="readonly",
                      width=10).pack(side=tk.LEFT, padx=(4, 0))
 
-        # 啟用
+        # ── 固定欄位：啟用 ──
         self._enabled_var = tk.BooleanVar(value=s.get("enabled", True))
         tk.Checkbutton(self, text="啟用此步驟",
                        variable=self._enabled_var).pack(**PAD)
 
-        # 確定 / 取消
+        # ── 按鈕 ──
         f = tk.Frame(self); f.pack(pady=8)
-        tk.Button(f, text="確定", width=10,
-                  bg="#27ae60", fg="white",
+        tk.Button(f, text="確定", width=10, bg="#27ae60", fg="white",
                   command=self._ok).pack(side=tk.LEFT, padx=6)
         tk.Button(f, text="取消", width=10,
                   command=self.destroy).pack(side=tk.LEFT, padx=6)
@@ -257,11 +332,51 @@ class StepDialog(tk.Toplevel):
         self._on_action_change()
         self.wait_window()
 
+    # ── 動態顯示/隱藏欄位群組 ──────────────────────────────
+
     def _on_action_change(self, *_):
-        if self._action_var.get() == "sleep":
-            self._timeout_label_var.set("等待秒數")
+        action = self._action_var.get()
+        PAD = {"fill": tk.X, "padx": 10, "pady": 3}
+
+        def show(frame): frame.pack(PAD)
+        def hide(frame): frame.pack_forget()
+
+        # 模板 + 相似度
+        if action in _NEEDS_TEMPLATE:
+            show(self._tmpl_frame)
+            show(self._conf_frame)
         else:
-            self._timeout_label_var.set("逾時秒數")
+            hide(self._tmpl_frame)
+            hide(self._conf_frame)
+
+        # 座標
+        if action in _NEEDS_COORD:
+            show(self._coord_frame)
+        else:
+            hide(self._coord_frame)
+
+        # 滾動量
+        if action in _NEEDS_SCROLL:
+            show(self._scroll_frame)
+        else:
+            hide(self._scroll_frame)
+
+        # 點擊方式
+        if action in _NEEDS_CLICK_TYPE:
+            show(self._click_type_frame)
+        else:
+            hide(self._click_type_frame)
+
+        # 逾時 / 等待秒數
+        if action in _NEEDS_TIMEOUT:
+            self._timeout_label_var.set("等待秒數" if action == "sleep" else "逾時秒數")
+            show(self._timeout_frame)
+        else:
+            hide(self._timeout_frame)
+
+        # 重新計算視窗大小
+        self.update_idletasks()
+        self.geometry("")
 
     def _browse(self):
         path = filedialog.askopenfilename(
@@ -275,13 +390,17 @@ class StepDialog(tk.Toplevel):
 
     def _ok(self):
         self.result = {
-            "name":       self._name.get().strip() or "未命名",
-            "action":     self._action_var.get(),
-            "template":   self._tmpl.get().strip(),
-            "on_fail":    self._on_fail_var.get(),
-            "enabled":    self._enabled_var.get(),
-            "timeout":    float(self._timeout.get() or 10),
-            "confidence": float(self._conf.get() or 0.8),
+            "name":          self._name.get().strip() or "未命名",
+            "action":        self._action_var.get(),
+            "template":      self._tmpl.get().strip(),
+            "on_fail":       self._on_fail_var.get(),
+            "enabled":       self._enabled_var.get(),
+            "timeout":       float(self._timeout.get() or 10),
+            "confidence":    float(self._conf.get() or 0.8),
+            "x":             int(self._x.get() or 0),
+            "y":             int(self._y.get() or 0),
+            "scroll_amount": int(self._scroll_amount.get() or 3),
+            "click_type":    self._click_type_var.get(),
         }
         self.destroy()
 
