@@ -93,11 +93,15 @@ def find_only(
             _show_debug(screen, template, max_loc, max_val, confidence)
 
         if max_val >= confidence:
+            scale = _dpi_scale()
             rx = _capture_region[0] if _capture_region else 0
             ry = _capture_region[1] if _capture_region else 0
-            cx = max_loc[0] + w // 2 + offset_x + rx
-            cy = max_loc[1] + h // 2 + offset_y + ry
-            print(f"  ✅ 找到 {Path(template_path).name}  相似度 {max_val:.0%}  位置 ({cx}, {cy})")
+            # 截圖座標（實體像素）÷ scale → 邏輯像素，再加 region offset（已是邏輯像素）
+            cx = int((max_loc[0] + w // 2) / scale) + offset_x + rx
+            cy = int((max_loc[1] + h // 2) / scale) + offset_y + ry
+            print(f"  ✅ 找到 {Path(template_path).name}  相似度 {max_val:.0%}  "
+                  f"位置 ({cx}, {cy})"
+                  + (f"  DPI×{scale:.2f}" if scale != 1.0 else ""))
             if debug:
                 cv2.destroyAllWindows()
             return (cx, cy)
@@ -222,6 +226,18 @@ def sleep(seconds: float, reason: str = ""):
 def _screenshot():
     screenshot = pyautogui.screenshot(region=_capture_region)
     return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+
+def _dpi_scale() -> float:
+    """
+    回傳截圖實體像素與邏輯像素的比例。
+    Windows DPI 150% → 回傳 1.5；100% → 回傳 1.0。
+    截圖座標需除以此值才能正確對應 pyautogui.click() 的邏輯座標。
+    """
+    logical_w, _ = pyautogui.size()
+    img = pyautogui.screenshot()
+    physical_w = img.size[0]
+    return physical_w / logical_w if logical_w else 1.0
 
 
 def _check_file(path: str):
