@@ -97,6 +97,7 @@ _NEEDS_SCROLL     = {"scroll"}
 _NEEDS_CLICK_TYPE = {"click_xy"}
 _NEEDS_FOLDER     = {"rename_pdf"}
 _NEEDS_GROUP      = {"run_group"}
+_NEEDS_OFFSET     = {"find_and_click"}
 
 
 # ════════════════════════════════════════════════════════════
@@ -250,16 +251,20 @@ def _execute(step: dict) -> bool:
     x       = int(step.get("x", 0))
     y       = int(step.get("y", 0))
 
+    offset_x = int(step.get("offset_x", 0))
+    offset_y = int(step.get("offset_y", 0))
+
     if action == "find_and_click":
         if len(templates) > 1:
             result = _find_any(templates, conf, timeout)
             if result is None:
                 return False
             _, cx, cy = result
-            pyautogui.click(cx, cy)
-            print(f"  🖱️  左鍵 點擊 ({cx}, {cy})")
+            pyautogui.click(cx + offset_x, cy + offset_y)
+            print(f"  🖱️  左鍵 點擊 ({cx + offset_x}, {cy + offset_y})")
             return True
-        return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout))
+        return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout,
+                                      offset_x=offset_x, offset_y=offset_y))
     elif action == "wait_for_image":
         if len(templates) > 1:
             return _find_any(templates, conf, timeout) is not None
@@ -455,6 +460,24 @@ class StepDialog(tk.Toplevel):
         self._conf.insert(0, str(s.get("confidence", 0.8)))
         self._conf.pack(side=tk.LEFT, padx=(4, 0))
 
+        # ── 可切換群組：點擊偏移（圖片點擊用）──
+        self._offset_frame = tk.Frame(self)
+        tk.Label(self._offset_frame, text="點擊偏移", width=10, anchor="e").pack(side=tk.LEFT)
+        tk.Label(self._offset_frame, text="X").pack(side=tk.LEFT, padx=(4, 2))
+        self._offset_x = tk.Spinbox(self._offset_frame, from_=-500, to=500,
+                                     increment=1, width=6)
+        self._offset_x.delete(0, tk.END)
+        self._offset_x.insert(0, str(s.get("offset_x", 0)))
+        self._offset_x.pack(side=tk.LEFT)
+        tk.Label(self._offset_frame, text="Y").pack(side=tk.LEFT, padx=(8, 2))
+        self._offset_y = tk.Spinbox(self._offset_frame, from_=-500, to=500,
+                                     increment=1, width=6)
+        self._offset_y.delete(0, tk.END)
+        self._offset_y.insert(0, str(s.get("offset_y", 0)))
+        self._offset_y.pack(side=tk.LEFT)
+        tk.Label(self._offset_frame, text="（從圖片中心偏移）",
+                 fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=4)
+
         # ── 可切換群組：座標 X / Y ──
         self._coord_frame = tk.Frame(self)
         tk.Label(self._coord_frame, text="座標 X", width=10, anchor="e").pack(side=tk.LEFT)
@@ -582,6 +605,12 @@ class StepDialog(tk.Toplevel):
         else:
             hide(self._folder_frame)
 
+        # 點擊偏移
+        if action in _NEEDS_OFFSET:
+            show(self._offset_frame)
+        else:
+            hide(self._offset_frame)
+
         # 群組
         if action in _NEEDS_GROUP:
             show(self._group_frame)
@@ -633,6 +662,8 @@ class StepDialog(tk.Toplevel):
             "confidence":    float(self._conf.get() or 0.8),
             "x":             int(self._x.get() or 0),
             "y":             int(self._y.get() or 0),
+            "offset_x":      int(self._offset_x.get() or 0),
+            "offset_y":      int(self._offset_y.get() or 0),
             "scroll_amount": int(self._scroll_amount.get() or 3),
             "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
             "folder":        self._folder.get().strip(),
