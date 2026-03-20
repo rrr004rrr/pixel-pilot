@@ -191,7 +191,10 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
         return False
 
     import uuid
-    success = 0
+
+    # 第一步：讀取所有 PDF 的目標名稱，並全部先改成暫存亂數名
+    # 這樣即使 A.pdf 的目標剛好是 B.pdf，也不會互相衝突
+    jobs = []  # [(tmp_path, original_name, new_path)]
     for pdf_path in pdfs:
         try:
             with pdfplumber.open(str(pdf_path)) as pdf:
@@ -202,24 +205,27 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
                 continue
             new_name = _INVALID.sub("_", first_line) + ".pdf"
             new_path = pdf_path.parent / new_name
-            if new_path == pdf_path:
-                print(f"  ℹ️  已是正確檔名，略過：{pdf_path.name}")
-                success += 1
-                continue
-            # 先改成亂數名稱，避免與目標名稱衝突（例如大小寫相同或檔案被佔用）
             tmp_path = pdf_path.parent / f"_tmp_{uuid.uuid4().hex}.pdf"
             pdf_path.rename(tmp_path)
-            if new_path.exists():
-                # 目標已存在：還原原檔名後略過
-                tmp_path.rename(pdf_path)
-                print(f"  ⚠️  目標已存在，略過：{new_name}")
-                continue
-            tmp_path.rename(new_path)
-            print(f"  ✅ {pdf_path.name}")
-            print(f"     → {new_name}")
-            success += 1
+            jobs.append((tmp_path, pdf_path.name, new_path))
         except Exception as e:
-            print(f"  ❌ {pdf_path.name}：{e}")
+            print(f"  ❌ {pdf_path.name}（讀取/暫存失敗）：{e}")
+
+    # 第二步：全部暫存名都就位後，再改成目標名稱
+    success = 0
+    for tmp_path, original_name, new_path in jobs:
+        try:
+            if new_path == tmp_path or (not new_path.exists()):
+                tmp_path.rename(new_path)
+                print(f"  ✅ {original_name}")
+                print(f"     → {new_path.name}")
+                success += 1
+            else:
+                # 目標已存在（非本批次的舊檔），還原原名後略過
+                tmp_path.rename(tmp_path.parent / original_name)
+                print(f"  ⚠️  目標已存在，略過：{new_path.name}")
+        except Exception as e:
+            print(f"  ❌ {original_name}（改名失敗）：{e}")
 
     print(f"\n  📄 完成：{success}/{len(pdfs)} 個 PDF 重新命名")
     return success > 0
