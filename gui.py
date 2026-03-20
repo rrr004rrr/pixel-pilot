@@ -70,6 +70,7 @@ ACTION_LABELS = {
     "click_xy":            "座標點擊",
     "scroll":              "滾輪",
     "sleep":               "等待(秒)",
+    "rename_pdf":          "重新命名PDF",
 }
 ON_FAIL_OPTIONS       = ["stop", "skip", "retry"]
 ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次"]
@@ -87,11 +88,12 @@ DISPLAY_TO_ACTION     = {v: k for k, v in ACTION_LABELS.items()}  # 中文 → k
 ACTION_TO_DISPLAY     = ACTION_LABELS                          # key → 中文（同 ACTION_LABELS）
 
 # 各動作需要的欄位群組
-_NEEDS_TEMPLATE = {"find_and_click", "wait_for_image", "wait_for_image_gone", "image_exists"}
-_NEEDS_TIMEOUT  = {"find_and_click", "wait_for_image", "wait_for_image_gone", "sleep"}
-_NEEDS_COORD    = {"move", "click_xy", "scroll"}
-_NEEDS_SCROLL   = {"scroll"}
+_NEEDS_TEMPLATE   = {"find_and_click", "wait_for_image", "wait_for_image_gone", "image_exists"}
+_NEEDS_TIMEOUT    = {"find_and_click", "wait_for_image", "wait_for_image_gone", "sleep"}
+_NEEDS_COORD      = {"move", "click_xy", "scroll"}
+_NEEDS_SCROLL     = {"scroll"}
 _NEEDS_CLICK_TYPE = {"click_xy"}
+_NEEDS_FOLDER     = {"rename_pdf"}
 
 
 # ════════════════════════════════════════════════════════════
@@ -131,6 +133,60 @@ def save_steps(steps: list):
 #  步驟執行器
 # ════════════════════════════════════════════════════════════
 
+def _rename_pdfs_in_folder(folder: str) -> bool:
+    """
+    掃描資料夾內所有 PDF，擷取第一行文字作為新檔名並重新命名。
+    回傳 True = 至少成功處理一個；False = 沒有 PDF 或全部失敗。
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        print("  ❌ 缺少套件，請執行：pip install pdfplumber")
+        return False
+
+    import re
+    folder_path = Path(folder)
+    if not folder_path.exists():
+        print(f"  ❌ 找不到資料夾：{folder}")
+        return False
+
+    # Windows 檔名不允許的字元
+    _INVALID = re.compile(r'[\\/:*?"<>|]')
+
+    pdfs = list(folder_path.glob("*.pdf"))
+    if not pdfs:
+        print(f"  ⚠️  資料夾內沒有 PDF：{folder}")
+        return False
+
+    success = 0
+    for pdf_path in pdfs:
+        try:
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                text = pdf.pages[0].extract_text() or ""
+            first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
+            if not first_line:
+                print(f"  ⚠️  無法擷取文字，略過：{pdf_path.name}")
+                continue
+            new_name = _INVALID.sub("_", first_line) + ".pdf"
+            new_path = pdf_path.parent / new_name
+            if new_path == pdf_path:
+                print(f"  ℹ️  已是正確檔名，略過：{pdf_path.name}")
+                success += 1
+                continue
+            if new_path.exists():
+                print(f"  ⚠️  目標已存在，略過：{new_name}")
+                continue
+            pdf_path.rename(new_path)
+            print(f"  ✅ {pdf_path.name}")
+            print(f"     → {new_name}")
+            success += 1
+        except Exception as e:
+            print(f"  ❌ {pdf_path.name}：{e}")
+
+    print(f"\n  📄 完成：{success}/{len(pdfs)} 個 PDF 重新命名")
+    return success > 0
+
+
 def _execute(step: dict) -> bool:
     import pyautogui
     action  = step["action"]
@@ -169,6 +225,8 @@ def _execute(step: dict) -> bool:
         label = CLICK_TYPE_LABELS.get(click_type, click_type)
         print(f"  🖱️  {label} 點擊 ({x}, {y})")
         return True
+    elif action == "rename_pdf":
+        return _rename_pdfs_in_folder(step.get("folder", ""))
     elif action == "scroll":
         amount = int(step.get("scroll_amount", 3))
         direction = "向上" if amount > 0 else "向下"
@@ -311,6 +369,15 @@ class StepDialog(tk.Toplevel):
                      values=CLICK_TYPE_DISPLAY, state="readonly",
                      width=10).pack(side=tk.LEFT, padx=(4, 0))
 
+        # ── 可切換群組：資料夾路徑 ──
+        self._folder_frame = tk.Frame(self)
+        tk.Label(self._folder_frame, text="PDF 資料夾", width=10, anchor="e").pack(side=tk.LEFT)
+        self._folder = tk.Entry(self._folder_frame, width=28)
+        self._folder.insert(0, s.get("folder", ""))
+        self._folder.pack(side=tk.LEFT, padx=(4, 4))
+        tk.Button(self._folder_frame, text="瀏覽…",
+                  command=self._browse_folder).pack(side=tk.LEFT)
+
         # ── 可切換群組：逾時 / 等待秒數 ──
         self._timeout_frame = tk.Frame(self)
         self._timeout_label_var = tk.StringVar()
@@ -381,6 +448,12 @@ class StepDialog(tk.Toplevel):
         else:
             hide(self._click_type_frame)
 
+        # 資料夾
+        if action in _NEEDS_FOLDER:
+            show(self._folder_frame)
+        else:
+            hide(self._folder_frame)
+
         # 逾時 / 等待秒數
         if action in _NEEDS_TIMEOUT:
             self._timeout_label_var.set("等待秒數" if action == "sleep" else "逾時秒數")
@@ -402,6 +475,12 @@ class StepDialog(tk.Toplevel):
             self._tmpl.delete(0, tk.END)
             self._tmpl.insert(0, path)
 
+    def _browse_folder(self):
+        path = filedialog.askdirectory(title="選擇 PDF 資料夾")
+        if path:
+            self._folder.delete(0, tk.END)
+            self._folder.insert(0, path)
+
     def _ok(self):
         self.result = {
             "name":          self._name.get().strip() or "未命名",
@@ -415,6 +494,7 @@ class StepDialog(tk.Toplevel):
             "y":             int(self._y.get() or 0),
             "scroll_amount": int(self._scroll_amount.get() or 3),
             "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
+            "folder":        self._folder.get().strip(),
         }
         self.destroy()
 
