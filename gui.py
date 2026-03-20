@@ -190,6 +190,7 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
         print(f"  ⚠️  資料夾內沒有 PDF：{folder}")
         return False
 
+    import uuid
     success = 0
     for pdf_path in pdfs:
         try:
@@ -205,10 +206,15 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
                 print(f"  ℹ️  已是正確檔名，略過：{pdf_path.name}")
                 success += 1
                 continue
+            # 先改成亂數名稱，避免與目標名稱衝突（例如大小寫相同或檔案被佔用）
+            tmp_path = pdf_path.parent / f"_tmp_{uuid.uuid4().hex}.pdf"
+            pdf_path.rename(tmp_path)
             if new_path.exists():
+                # 目標已存在：還原原檔名後略過
+                tmp_path.rename(pdf_path)
                 print(f"  ⚠️  目標已存在，略過：{new_name}")
                 continue
-            pdf_path.rename(new_path)
+            tmp_path.rename(new_path)
             print(f"  ✅ {pdf_path.name}")
             print(f"     → {new_name}")
             success += 1
