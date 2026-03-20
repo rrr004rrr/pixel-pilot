@@ -153,6 +153,17 @@ def save_steps(steps: list):
 #  步驟執行器
 # ════════════════════════════════════════════════════════════
 
+def _tmpl_display(step: dict) -> str:
+    """回傳步驟模板欄位的顯示文字"""
+    templates = step.get("templates") or ([step["template"]] if step.get("template") else [])
+    if not templates:
+        return ""
+    names = [Path(t).name for t in templates]
+    if len(names) == 1:
+        return names[0]
+    return f"[{len(names)} 張] " + " / ".join(names)
+
+
 def _rename_pdfs_in_folder(folder: str) -> bool:
     """
     掃描資料夾內所有 PDF，擷取第一行文字作為新檔名並重新命名。
@@ -207,10 +218,32 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
     return success > 0
 
 
+def _find_any(templates: list, confidence: float, timeout: float):
+    """輪流掃描多張圖，任一找到即回傳 (path, x, y)；全部超時回傳 None。"""
+    names = " / ".join(Path(t).name for t in templates)
+    print(f"  🔍 多圖比對：{names}")
+    start = time.time()
+    while True:
+        for tmpl in templates:
+            try:
+                if ac.image_exists(tmpl, confidence=confidence):
+                    pos = ac.find_only(tmpl, confidence=confidence, wait_timeout=2.0)
+                    if pos:
+                        return tmpl, pos[0], pos[1]
+            except Exception:
+                pass
+        if time.time() - start >= timeout:
+            print(f"  ⏰ 超時 {timeout}s，所有圖片均未找到")
+            return None
+        time.sleep(0.3)
+
+
 def _execute(step: dict) -> bool:
     import pyautogui
     action  = step["action"]
-    tmpl    = step.get("template", "")
+    # 支援新格式 templates（list）與舊格式 template（str）
+    templates = step.get("templates") or ([step["template"]] if step.get("template") else [])
+    tmpl    = templates[0] if templates else ""
     conf    = float(step.get("confidence", 0.8))
     timeout = float(step.get("timeout", 10.0))
     name    = step.get("name", action)
@@ -218,12 +251,44 @@ def _execute(step: dict) -> bool:
     y       = int(step.get("y", 0))
 
     if action == "find_and_click":
+        if len(templates) > 1:
+            result = _find_any(templates, conf, timeout)
+            if result is None:
+                return False
+            _, cx, cy = result
+            pyautogui.click(cx, cy)
+            print(f"  🖱️  左鍵 點擊 ({cx}, {cy})")
+            return True
         return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout))
     elif action == "wait_for_image":
+        if len(templates) > 1:
+            return _find_any(templates, conf, timeout) is not None
         return ac.wait_for_image(tmpl, confidence=conf, timeout=timeout)
     elif action == "wait_for_image_gone":
+        if len(templates) > 1:
+            # 等待全部消失
+            names = " / ".join(Path(t).name for t in templates)
+            print(f"  ⏳ 等待全部消失：{names}")
+            start = time.time()
+            while True:
+                remaining = [t for t in templates if ac.image_exists(t, confidence=conf)]
+                if not remaining:
+                    print(f"  ✅ 全部已消失")
+                    return True
+                if time.time() - start >= timeout:
+                    still = " / ".join(Path(t).name for t in remaining)
+                    print(f"  ⏰ 超時，仍存在：{still}")
+                    return False
+                time.sleep(0.3)
         return ac.wait_for_image_gone(tmpl, confidence=conf, timeout=timeout)
     elif action == "image_exists":
+        if len(templates) > 1:
+            for t in templates:
+                if ac.image_exists(t, confidence=conf):
+                    print(f"  ✅ 確認存在：{Path(t).name}")
+                    return True
+            print(f"  ❌ 全部不存在：{' / '.join(Path(t).name for t in templates)}")
+            return False
         ok = ac.image_exists(tmpl, confidence=conf)
         print(f"  {'✅ 確認存在' if ok else '❌ 不存在'}：{Path(tmpl).name}")
         return ok
@@ -357,13 +422,29 @@ class StepDialog(tk.Toplevel):
         cb.pack(side=tk.LEFT, padx=(4, 0))
         cb.bind("<<ComboboxSelected>>", self._on_action_change)
 
-        # ── 可切換群組：模板 ──
+        # ── 可切換群組：模板（多選）──
         self._tmpl_frame = tk.Frame(self)
-        tk.Label(self._tmpl_frame, text="模板檔案", width=10, anchor="e").pack(side=tk.LEFT)
-        self._tmpl = tk.Entry(self._tmpl_frame, width=24)
-        self._tmpl.insert(0, s.get("template", ""))
-        self._tmpl.pack(side=tk.LEFT, padx=(4, 4))
-        tk.Button(self._tmpl_frame, text="瀏覽…", command=self._browse).pack(side=tk.LEFT)
+        tk.Label(self._tmpl_frame, text="模板圖片", width=10, anchor="ne",
+                 pady=4).pack(side=tk.LEFT)
+        _right = tk.Frame(self._tmpl_frame)
+        _right.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._tmpl_listbox = tk.Listbox(_right, height=3, width=34, selectmode="single")
+        self._tmpl_listbox.pack(fill=tk.X)
+
+        # 載入舊格式 (template) 或新格式 (templates)
+        _init_tmpls = s.get("templates") or ([s["template"]] if s.get("template") else [])
+        for t in _init_tmpls:
+            self._tmpl_listbox.insert(tk.END, t)
+
+        _btn_row = tk.Frame(_right)
+        _btn_row.pack(fill=tk.X, pady=(2, 0))
+        tk.Button(_btn_row, text="＋ 新增圖片",
+                  command=self._browse).pack(side=tk.LEFT)
+        tk.Button(_btn_row, text="✕ 移除",
+                  command=self._remove_tmpl).pack(side=tk.LEFT, padx=6)
+        tk.Label(_btn_row, text="（可新增多張，任一符合即成功）",
+                 fg="#888", font=("", 8)).pack(side=tk.LEFT)
 
         # ── 可切換群組：相似度 ──
         self._conf_frame = tk.Frame(self)
@@ -519,14 +600,20 @@ class StepDialog(tk.Toplevel):
         self.geometry("")
 
     def _browse(self):
-        path = filedialog.askopenfilename(
-            title="選擇模板圖片",
+        paths = filedialog.askopenfilenames(
+            title="選擇模板圖片（可多選）",
             filetypes=[("PNG 圖片", "*.png"), ("所有檔案", "*.*")],
             initialdir="templates",
         )
-        if path:
-            self._tmpl.delete(0, tk.END)
-            self._tmpl.insert(0, path)
+        existing = list(self._tmpl_listbox.get(0, tk.END))
+        for p in paths:
+            if p not in existing:
+                self._tmpl_listbox.insert(tk.END, p)
+
+    def _remove_tmpl(self):
+        sel = self._tmpl_listbox.curselection()
+        if sel:
+            self._tmpl_listbox.delete(sel[0])
 
     def _browse_folder(self):
         path = filedialog.askdirectory(title="選擇 PDF 資料夾")
@@ -538,7 +625,8 @@ class StepDialog(tk.Toplevel):
         self.result = {
             "name":          self._name.get().strip() or "未命名",
             "action":        DISPLAY_TO_ACTION.get(self._action_var.get(), self._action_var.get()),
-            "template":      self._tmpl.get().strip(),
+            "templates":     list(self._tmpl_listbox.get(0, tk.END)),
+            "template":      self._tmpl_listbox.get(0) if self._tmpl_listbox.size() else "",
             "on_fail":       DISPLAY_TO_ON_FAIL.get(self._on_fail_var.get(), self._on_fail_var.get()),
             "enabled":       self._enabled_var.get(),
             "timeout":       float(self._timeout.get() or 10),
@@ -922,7 +1010,7 @@ class App(tk.Tk):
                     "✔" if enabled else "✘",
                     s["name"],
                     ACTION_LABELS.get(s["action"], s["action"]),
-                    s.get("template", ""),
+                    _tmpl_display(s),
                     s.get("on_fail", "stop"),
                     "⏸ 等待",
                 ),
