@@ -729,9 +729,9 @@ class StepDialog(tk.Toplevel):
                       (max_loc[0] - x0, max_loc[1] - y0),
                       (max_loc[0] - x0 + w, max_loc[1] - y0 + h),
                       (0, 200, 0), 2)
-        # 紅十字 = 點擊落點（physical pixels）
-        px = raw_x - x0
-        py = raw_y - y0
+        # 紅十字 = 點擊落點（physical pixels，含偏移）
+        px = raw_x + int(offset_x * scale) - x0
+        py = raw_y + int(offset_y * scale) - y0
         cv2.drawMarker(crop, (px, py), (0, 0, 255),
                        cv2.MARKER_CROSS, 24, 2)
 
