@@ -1,0 +1,660 @@
+"""
+gui.py — 視窗版自動化流程控制介面（含步驟編輯）
+執行：python gui.py
+"""
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+import threading
+import sys
+import json
+import time
+import ctypes
+import ctypes.wintypes
+from pathlib import Path
+import auto_clicker as ac
+
+
+# ════════════════════════════════════════════════════════════
+#  Windows 視窗列舉（ctypes，無需額外安裝套件）
+# ════════════════════════════════════════════════════════════
+
+def list_windows() -> list[tuple[int, str]]:
+    """回傳所有可見且有標題的視窗：[(hwnd, title), ...]"""
+    results = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def _cb(hwnd, _):
+        if ctypes.windll.user32.IsWindowVisible(hwnd):
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            if length:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                results.append((hwnd, buf.value))
+        return True
+
+    ctypes.windll.user32.EnumWindows(_cb, 0)
+    return results
+
+
+def get_window_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """回傳視窗目前位置 (x, y, width, height)"""
+    rect = ctypes.wintypes.RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return (rect.left, rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top)
+
+# ════════════════════════════════════════════════════════════
+#  常數
+# ════════════════════════════════════════════════════════════
+
+STEPS_FILE = "steps.json"
+
+ACTIONS = [
+    "find_and_click",
+    "wait_for_image",
+    "wait_for_image_gone",
+    "image_exists",
+    "sleep",
+]
+ACTION_LABELS = {
+    "find_and_click":    "點擊",
+    "wait_for_image":    "等待出現",
+    "wait_for_image_gone": "等待消失",
+    "image_exists":      "確認存在",
+    "sleep":             "等待(秒)",
+}
+ON_FAIL_OPTIONS = ["stop", "skip", "retry"]
+
+
+# ════════════════════════════════════════════════════════════
+#  步驟資料 — 讀寫 steps.json
+# ════════════════════════════════════════════════════════════
+
+def _empty_step(n: int) -> dict:
+    return {
+        "name":       f"步驟{n:02d}",
+        "action":     "find_and_click",
+        "template":   "",
+        "on_fail":    "stop",
+        "enabled":    True,
+        "timeout":    10.0,
+        "confidence": 0.8,
+    }
+
+
+def load_steps() -> list:
+    p = Path(STEPS_FILE)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def save_steps(steps: list):
+    Path(STEPS_FILE).write_text(
+        json.dumps(steps, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+# ════════════════════════════════════════════════════════════
+#  步驟執行器
+# ════════════════════════════════════════════════════════════
+
+def _execute(step: dict) -> bool:
+    action  = step["action"]
+    tmpl    = step.get("template", "")
+    conf    = float(step.get("confidence", 0.8))
+    timeout = float(step.get("timeout", 10.0))
+    name    = step.get("name", action)
+
+    if action == "find_and_click":
+        return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout))
+    elif action == "wait_for_image":
+        return ac.wait_for_image(tmpl, confidence=conf, timeout=timeout)
+    elif action == "wait_for_image_gone":
+        return ac.wait_for_image_gone(tmpl, confidence=conf, timeout=timeout)
+    elif action == "image_exists":
+        ok = ac.image_exists(tmpl, confidence=conf)
+        print(f"  {'✅ 確認存在' if ok else '❌ 不存在'}：{Path(tmpl).name}")
+        return ok
+    elif action == "sleep":
+        ac.sleep(timeout, name)
+        return True
+    return False
+
+
+def _run_with_retry(step: dict) -> bool:
+    on_fail = step.get("on_fail", "stop")
+    try:
+        if _execute(step):
+            print("  ✅ 成功")
+            return True
+
+        if on_fail == "skip":
+            print("  ⚠️  失敗，跳過（on_fail=skip）")
+            return True
+        elif on_fail == "retry":
+            print("  🔄 失敗，重試一次...")
+            time.sleep(1)
+            if _execute(step):
+                print("  ✅ 重試成功")
+                return True
+            print("  ❌ 重試仍失敗")
+        return False
+
+    except FileNotFoundError as e:
+        print(f"  ❌ 找不到截圖：{e}")
+        return on_fail == "skip"
+    except Exception as e:
+        print(f"  ❌ 錯誤：{e}")
+        return False
+
+
+# ════════════════════════════════════════════════════════════
+#  stdout → Text 元件
+# ════════════════════════════════════════════════════════════
+
+class _StdoutRedirector:
+    def __init__(self, widget):
+        self._w = widget
+
+    def write(self, msg: str):
+        self._w.configure(state="normal")
+        self._w.insert(tk.END, msg)
+        self._w.see(tk.END)
+        self._w.configure(state="disabled")
+
+    def flush(self):
+        pass
+
+
+# ════════════════════════════════════════════════════════════
+#  步驟編輯對話框
+# ════════════════════════════════════════════════════════════
+
+class StepDialog(tk.Toplevel):
+    """新增 / 編輯步驟 Modal 對話框"""
+
+    def __init__(self, parent, step: dict | None = None):
+        super().__init__(parent)
+        self.title("新增步驟" if step is None else "編輯步驟")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result = None
+
+        s = step.copy() if step else _empty_step(1)
+        PAD = {"padx": 10, "pady": 4}
+
+        # 名稱
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        tk.Label(f, text="名稱", width=10, anchor="e").pack(side=tk.LEFT)
+        self._name = tk.Entry(f, width=28)
+        self._name.insert(0, s.get("name", ""))
+        self._name.pack(side=tk.LEFT, padx=(4, 0))
+
+        # 動作
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        tk.Label(f, text="動作", width=10, anchor="e").pack(side=tk.LEFT)
+        self._action_var = tk.StringVar(value=s.get("action", "find_and_click"))
+        cb = ttk.Combobox(f, textvariable=self._action_var,
+                          values=ACTIONS, state="readonly", width=22)
+        cb.pack(side=tk.LEFT, padx=(4, 0))
+        cb.bind("<<ComboboxSelected>>", self._on_action_change)
+
+        # 模板檔案
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        tk.Label(f, text="模板檔案", width=10, anchor="e").pack(side=tk.LEFT)
+        self._tmpl = tk.Entry(f, width=24)
+        self._tmpl.insert(0, s.get("template", ""))
+        self._tmpl.pack(side=tk.LEFT, padx=(4, 4))
+        tk.Button(f, text="瀏覽…", command=self._browse).pack(side=tk.LEFT)
+
+        # 相似度
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        tk.Label(f, text="相似度", width=10, anchor="e").pack(side=tk.LEFT)
+        self._conf = tk.Spinbox(f, from_=0.10, to=1.00, increment=0.05,
+                                format="%.2f", width=7)
+        self._conf.delete(0, tk.END)
+        self._conf.insert(0, str(s.get("confidence", 0.8)))
+        self._conf.pack(side=tk.LEFT, padx=(4, 0))
+
+        # 等待秒數 / 逾時秒數
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        self._timeout_label_var = tk.StringVar()
+        tk.Label(f, textvariable=self._timeout_label_var,
+                 width=10, anchor="e").pack(side=tk.LEFT)
+        self._timeout = tk.Spinbox(f, from_=0, to=600, increment=1, width=7)
+        self._timeout.delete(0, tk.END)
+        self._timeout.insert(0, str(int(s.get("timeout", 10))))
+        self._timeout.pack(side=tk.LEFT, padx=(4, 0))
+
+        # 失敗行為
+        f = tk.Frame(self); f.pack(fill=tk.X, **PAD)
+        tk.Label(f, text="失敗行為", width=10, anchor="e").pack(side=tk.LEFT)
+        self._on_fail_var = tk.StringVar(value=s.get("on_fail", "stop"))
+        ttk.Combobox(f, textvariable=self._on_fail_var,
+                     values=ON_FAIL_OPTIONS, state="readonly",
+                     width=10).pack(side=tk.LEFT, padx=(4, 0))
+
+        # 啟用
+        self._enabled_var = tk.BooleanVar(value=s.get("enabled", True))
+        tk.Checkbutton(self, text="啟用此步驟",
+                       variable=self._enabled_var).pack(**PAD)
+
+        # 確定 / 取消
+        f = tk.Frame(self); f.pack(pady=8)
+        tk.Button(f, text="確定", width=10,
+                  bg="#27ae60", fg="white",
+                  command=self._ok).pack(side=tk.LEFT, padx=6)
+        tk.Button(f, text="取消", width=10,
+                  command=self.destroy).pack(side=tk.LEFT, padx=6)
+
+        self._on_action_change()
+        self.wait_window()
+
+    def _on_action_change(self, *_):
+        if self._action_var.get() == "sleep":
+            self._timeout_label_var.set("等待秒數")
+        else:
+            self._timeout_label_var.set("逾時秒數")
+
+    def _browse(self):
+        path = filedialog.askopenfilename(
+            title="選擇模板圖片",
+            filetypes=[("PNG 圖片", "*.png"), ("所有檔案", "*.*")],
+            initialdir="templates",
+        )
+        if path:
+            self._tmpl.delete(0, tk.END)
+            self._tmpl.insert(0, path)
+
+    def _ok(self):
+        self.result = {
+            "name":       self._name.get().strip() or "未命名",
+            "action":     self._action_var.get(),
+            "template":   self._tmpl.get().strip(),
+            "on_fail":    self._on_fail_var.get(),
+            "enabled":    self._enabled_var.get(),
+            "timeout":    float(self._timeout.get() or 10),
+            "confidence": float(self._conf.get() or 0.8),
+        }
+        self.destroy()
+
+
+# ════════════════════════════════════════════════════════════
+#  主視窗
+# ════════════════════════════════════════════════════════════
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Pixel Pilot — 影像辨識自動化")
+        self.geometry("940x680")
+        self.minsize(700, 500)
+
+        self._steps: list[dict] = load_steps()
+        self._stop_event = threading.Event()
+        self._running = False
+        self._hwnd: int | None = None          # 選定視窗的 HWND
+        self._win_map: dict[str, int] = {}     # 顯示名稱 → hwnd
+
+        self._build_ui()
+        self._refresh_tree()
+        self._refresh_windows()
+
+    # ── 建構 UI ─────────────────────────────────────────────
+
+    def _build_ui(self):
+        # ── 頂部工具列 ──
+        ctrl = tk.Frame(self, pady=6)
+        ctrl.pack(fill=tk.X, padx=10)
+
+        # 執行群組
+        run_box = tk.LabelFrame(ctrl, text="執行", padx=6, pady=2)
+        run_box.pack(side=tk.LEFT)
+
+        tk.Label(run_box, text="從步驟").pack(side=tk.LEFT)
+        self._start_var = tk.IntVar(value=1)
+        self._spin = tk.Spinbox(run_box, from_=1, to=max(len(self._steps), 1),
+                                width=4, textvariable=self._start_var)
+        self._spin.pack(side=tk.LEFT, padx=(2, 8))
+
+        self._btn_start = tk.Button(
+            run_box, text="▶ 開始", width=8,
+            bg="#27ae60", fg="white", font=("", 9, "bold"),
+            command=self._on_start,
+        )
+        self._btn_start.pack(side=tk.LEFT)
+
+        self._btn_stop = tk.Button(
+            run_box, text="⏹ 停止", width=8,
+            bg="#e74c3c", fg="white", state=tk.DISABLED,
+            command=self._on_stop,
+        )
+        self._btn_stop.pack(side=tk.LEFT, padx=(4, 6))
+
+        self._status = tk.Label(run_box, text="就緒", fg="#555", width=16, anchor="w")
+        self._status.pack(side=tk.LEFT)
+
+        # 編輯群組
+        edit_box = tk.LabelFrame(ctrl, text="步驟管理", padx=6, pady=2)
+        edit_box.pack(side=tk.LEFT, padx=10)
+
+        for text, cmd in [
+            ("＋ 新增", self._add_step),
+            ("✏ 編輯", self._edit_step),
+            ("✕ 刪除", self._delete_step),
+            ("↑ 上移", self._move_up),
+            ("↓ 下移", self._move_down),
+        ]:
+            tk.Button(edit_box, text=text, width=7,
+                      command=cmd).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(ctrl, text="💾 儲存", width=8,
+                  bg="#2980b9", fg="white",
+                  command=self._save).pack(side=tk.RIGHT)
+
+        # ── 視窗選擇器 ──
+        win_box = tk.LabelFrame(self, text="目標視窗（鎖定後只截該視窗範圍）",
+                                padx=8, pady=4)
+        win_box.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        self._win_var = tk.StringVar(value="（全螢幕）")
+        self._win_cb = ttk.Combobox(win_box, textvariable=self._win_var,
+                                    state="readonly", width=55)
+        self._win_cb.pack(side=tk.LEFT, padx=(0, 6))
+        self._win_cb.bind("<<ComboboxSelected>>", self._on_window_selected)
+
+        tk.Button(win_box, text="🔄 重新整理",
+                  command=self._refresh_windows).pack(side=tk.LEFT)
+
+        tk.Button(win_box, text="✕ 取消鎖定",
+                  command=self._clear_window).pack(side=tk.LEFT, padx=6)
+
+        self._win_status = tk.Label(win_box, text="", fg="#2980b9")
+        self._win_status.pack(side=tk.LEFT, padx=8)
+
+        # ── 步驟清單 ──
+        frame_steps = tk.LabelFrame(self, text="步驟清單（雙擊列可編輯）",
+                                    padx=6, pady=4)
+        frame_steps.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        cols = ("#", "啟用", "步驟名稱", "動作", "模板", "失敗行為", "狀態")
+        self._tree = ttk.Treeview(frame_steps, columns=cols,
+                                   show="headings", height=10)
+
+        col_cfg = {
+            "#":     (36,  "center", False),
+            "啟用":  (44,  "center", False),
+            "步驟名稱": (160, "w",   False),
+            "動作":  (90,  "center", False),
+            "模板":  (240, "w",     True),
+            "失敗行為": (72, "center", False),
+            "狀態":  (90,  "center", False),
+        }
+        for col, (w, anchor, stretch) in col_cfg.items():
+            self._tree.heading(col, text=col)
+            self._tree.column(col, width=w, anchor=anchor, stretch=stretch)
+
+        self._tree.pack(fill=tk.X)
+        self._tree.bind("<Double-1>", lambda _: self._edit_step())
+
+        self._tree.tag_configure("waiting",  background="white")
+        self._tree.tag_configure("running",  background="#fff9c4")
+        self._tree.tag_configure("success",  background="#c8e6c9")
+        self._tree.tag_configure("failed",   background="#ffcdd2")
+        self._tree.tag_configure("skipped",  background="#eeeeee")
+        self._tree.tag_configure("disabled", foreground="#aaaaaa")
+
+        # ── Log ──
+        frame_log = tk.LabelFrame(self, text="執行 Log", padx=6, pady=4)
+        frame_log.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+
+        tk.Button(frame_log, text="清除",
+                  command=self._clear_log).pack(anchor="ne")
+
+        self._log = scrolledtext.ScrolledText(
+            frame_log, state="disabled",
+            font=("Consolas", 9), height=12,
+        )
+        self._log.pack(fill=tk.BOTH, expand=True)
+
+    # ── 步驟清單工具 ────────────────────────────────────────
+
+    def _refresh_tree(self):
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+        for i, s in enumerate(self._steps, 1):
+            enabled = s.get("enabled", True)
+            self._tree.insert(
+                "", tk.END, iid=str(i),
+                values=(
+                    f"{i:02d}",
+                    "✔" if enabled else "✘",
+                    s["name"],
+                    ACTION_LABELS.get(s["action"], s["action"]),
+                    s.get("template", ""),
+                    s.get("on_fail", "stop"),
+                    "⏸ 等待",
+                ),
+                tags=("waiting" if enabled else "disabled",),
+            )
+        self._spin.config(to=max(len(self._steps), 1))
+
+    def _set_row_status(self, one_based: int, label: str, tag: str):
+        iid = str(one_based)
+        if not self._tree.exists(iid):
+            return
+        vals = list(self._tree.item(iid)["values"])
+        vals[6] = label
+        self._tree.item(iid, values=vals, tags=(tag,))
+
+    def _selected_index(self) -> int | None:
+        """回傳 0-based index；無選取時回傳 None"""
+        sel = self._tree.selection()
+        return int(sel[0]) - 1 if sel else None
+
+    # ── 編輯操作 ────────────────────────────────────────────
+
+    def _add_step(self):
+        dlg = StepDialog(self)
+        if dlg.result:
+            idx = self._selected_index()
+            pos = len(self._steps) if idx is None else idx + 1
+            self._steps.insert(pos, dlg.result)
+            self._refresh_tree()
+            self._tree.selection_set(str(pos + 1))
+
+    def _edit_step(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        dlg = StepDialog(self, self._steps[idx])
+        if dlg.result:
+            self._steps[idx] = dlg.result
+            self._refresh_tree()
+            self._tree.selection_set(str(idx + 1))
+
+    def _delete_step(self):
+        idx = self._selected_index()
+        if idx is None:
+            return
+        name = self._steps[idx]["name"]
+        if messagebox.askyesno("確認刪除", f"確定要刪除「{name}」？"):
+            self._steps.pop(idx)
+            self._refresh_tree()
+
+    def _move_up(self):
+        idx = self._selected_index()
+        if idx is None or idx == 0:
+            return
+        self._steps[idx - 1], self._steps[idx] = (
+            self._steps[idx], self._steps[idx - 1])
+        self._refresh_tree()
+        self._tree.selection_set(str(idx))      # 移動後新位置（1-based = idx）
+
+    def _move_down(self):
+        idx = self._selected_index()
+        if idx is None or idx >= len(self._steps) - 1:
+            return
+        self._steps[idx], self._steps[idx + 1] = (
+            self._steps[idx + 1], self._steps[idx])
+        self._refresh_tree()
+        self._tree.selection_set(str(idx + 2))  # 移動後新位置（1-based = idx+2）
+
+    # ── 視窗選擇 ────────────────────────────────────────────
+
+    def _refresh_windows(self):
+        wins = list_windows()
+        self._win_map = {}
+        labels = ["（全螢幕）"]
+        for hwnd, title in wins:
+            label = f"{title}  [{hwnd}]"
+            self._win_map[label] = hwnd
+            labels.append(label)
+        self._win_cb["values"] = labels
+        # 保留目前選取（若視窗還存在）
+        if self._win_var.get() not in labels:
+            self._win_var.set("（全螢幕）")
+            self._clear_window()
+
+    def _on_window_selected(self, *_):
+        label = self._win_var.get()
+        if label == "（全螢幕）":
+            self._clear_window()
+            return
+        hwnd = self._win_map.get(label)
+        if not hwnd:
+            return
+        self._hwnd = hwnd
+        self._apply_window_region()
+
+    def _apply_window_region(self):
+        """讀取目前視窗位置並更新截圖區域"""
+        if not self._hwnd:
+            return
+        try:
+            region = get_window_rect(self._hwnd)
+            ac.set_capture_region(region)
+            self._win_status.config(
+                text=f"🪟 {region[0]},{region[1]}  {region[2]}×{region[3]}")
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法取得視窗位置：{e}")
+
+    def _clear_window(self):
+        self._hwnd = None
+        ac.set_capture_region(None)
+        self._win_var.set("（全螢幕）")
+        self._win_status.config(text="")
+
+    def _save(self):
+        save_steps(self._steps)
+        self._status.config(text="✅ 已儲存")
+        self.after(2000, lambda: self._status.config(text="就緒"))
+
+    # ── 執行控制 ────────────────────────────────────────────
+
+    def _on_start(self):
+        if self._running:
+            return
+        if not self._steps:
+            messagebox.showinfo("提示", "請先新增步驟")
+            return
+        self._stop_event.clear()
+        self._running = True
+        self._refresh_tree()
+        self._btn_start.config(state=tk.DISABLED)
+        self._btn_stop.config(state=tk.NORMAL)
+        self._status.config(text="執行中...")
+        # 執行前重新抓視窗位置（視窗可能被移動過）
+        if self._hwnd:
+            self._apply_window_region()
+        threading.Thread(target=self._run_workflow,
+                         args=(self._start_var.get(),),
+                         daemon=True).start()
+
+    def _on_stop(self):
+        self._stop_event.set()
+        self._status.config(text="停止中…")
+
+    def _clear_log(self):
+        self._log.configure(state="normal")
+        self._log.delete(1.0, tk.END)
+        self._log.configure(state="disabled")
+
+    # ── 背景執行緒 ──────────────────────────────────────────
+
+    def _run_workflow(self, start_from: int):
+        old_stdout = sys.stdout
+        sys.stdout = _StdoutRedirector(self._log)
+        try:
+            # 只跑啟用的步驟，保留原始 1-based index 供 UI 對應
+            active = [
+                (i + 1, s) for i, s in enumerate(self._steps)
+                if s.get("enabled", True)
+            ]
+            total = len(active)
+            print(f"🚀 開始執行（共 {total} 個啟用步驟）"
+                  f"  ⚠️ 緊急停止：滑鼠移到螢幕左上角\n")
+
+            stopped_at = None
+            for orig_idx, step in active:
+                if self._stop_event.is_set():
+                    print("\n⏹ 使用者手動停止")
+                    break
+
+                if orig_idx < start_from:
+                    self.after(0, self._set_row_status, orig_idx, "⏭ 略過", "skipped")
+                    print(f"  ⏭️  步驟 {orig_idx:02d} 略過（已完成）")
+                    continue
+
+                action_label = ACTION_LABELS.get(step["action"], step["action"])
+                self.after(0, self._set_row_status, orig_idx, "⏳ 執行中", "running")
+                self.after(0, self._status.config,
+                           {"text": f"步驟 {orig_idx}/{len(self._steps)}"})
+
+                print(f"\n{'━'*55}")
+                print(f"  步驟 {orig_idx:02d}  {step['name']}  [{action_label}]")
+                print(f"{'━'*55}")
+
+                success = _run_with_retry(step)
+
+                if success:
+                    self.after(0, self._set_row_status, orig_idx, "✅ 成功", "success")
+                else:
+                    self.after(0, self._set_row_status, orig_idx, "❌ 失敗", "failed")
+                    print(f"\n❌ 流程在步驟 {orig_idx:02d} 停止")
+                    stopped_at = orig_idx
+                    break
+            else:
+                if not self._stop_event.is_set():
+                    print(f"\n{'═'*55}")
+                    print(f"  ✅ 全部步驟執行完畢！")
+                    print(f"{'═'*55}")
+                    self.after(0, self._status.config, {"text": "✅ 完成"})
+
+            if stopped_at:
+                self.after(0, self._status.config,
+                           {"text": f"❌ 步驟 {stopped_at} 失敗"})
+            elif self._stop_event.is_set():
+                self.after(0, self._status.config, {"text": "⏹ 已停止"})
+
+        finally:
+            sys.stdout = old_stdout
+            self._running = False
+            self.after(0, self._btn_start.config, {"state": tk.NORMAL})
+            self.after(0, self._btn_stop.config,  {"state": tk.DISABLED})
+
+
+# ════════════════════════════════════════════════════════════
+#  入口
+# ════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()

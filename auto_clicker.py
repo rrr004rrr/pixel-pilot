@@ -16,6 +16,19 @@ from pathlib import Path
 pyautogui.FAILSAFE = True   # 滑鼠移到左上角 → 立即停止
 pyautogui.PAUSE = 0.3       # 每個操作後暫停 0.3 秒
 
+# ── 截圖區域（None = 全螢幕；由 gui.py 透過 set_capture_region 設定）────
+_capture_region: tuple | None = None  # (x, y, width, height)
+
+
+def set_capture_region(region: tuple | None):
+    """設定截圖範圍 (x, y, width, height)；傳 None 恢復全螢幕。"""
+    global _capture_region
+    _capture_region = region
+    if region:
+        print(f"  🪟 截圖區域：{region[0]},{region[1]}  {region[2]}×{region[3]}")
+    else:
+        print("  🖥️  截圖區域：全螢幕")
+
 
 # ── 主要函式 ─────────────────────────────────────────────────
 
@@ -80,8 +93,10 @@ def find_only(
             _show_debug(screen, template, max_loc, max_val, confidence)
 
         if max_val >= confidence:
-            cx = max_loc[0] + w // 2 + offset_x
-            cy = max_loc[1] + h // 2 + offset_y
+            rx = _capture_region[0] if _capture_region else 0
+            ry = _capture_region[1] if _capture_region else 0
+            cx = max_loc[0] + w // 2 + offset_x + rx
+            cy = max_loc[1] + h // 2 + offset_y + ry
             print(f"  ✅ 找到 {Path(template_path).name}  相似度 {max_val:.0%}  位置 ({cx}, {cy})")
             if debug:
                 cv2.destroyAllWindows()
@@ -205,7 +220,7 @@ def sleep(seconds: float, reason: str = ""):
 # ── 內部工具 ─────────────────────────────────────────────────
 
 def _screenshot():
-    screenshot = pyautogui.screenshot()
+    screenshot = pyautogui.screenshot(region=_capture_region)
     return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
 
