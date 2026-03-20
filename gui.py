@@ -513,6 +513,7 @@ class App(tk.Tk):
         self._steps: list[dict] = load_steps()
         self._stop_event = threading.Event()
         self._running = False
+        self._loop_var = tk.BooleanVar(value=False)   # 循環執行
         self._hwnd: int | None = None          # 選定視窗的 HWND
         self._win_map: dict[str, int] = {}     # 顯示名稱 → hwnd
 
@@ -551,8 +552,11 @@ class App(tk.Tk):
         )
         self._btn_stop.pack(side=tk.LEFT, padx=(4, 6))
 
-        self._status = tk.Label(run_box, text="就緒", fg="#555", width=16, anchor="w")
+        self._status = tk.Label(run_box, text="就緒", fg="#555", width=18, anchor="w")
         self._status.pack(side=tk.LEFT)
+
+        tk.Checkbutton(run_box, text="循環執行",
+                       variable=self._loop_var).pack(side=tk.LEFT, padx=(8, 0))
 
         # 編輯群組
         edit_box = tk.LabelFrame(ctrl, text="步驟管理", padx=6, pady=2)
@@ -806,56 +810,85 @@ class App(tk.Tk):
         old_stdout = sys.stdout
         sys.stdout = _StdoutRedirector(self._log)
         try:
-            # 只跑啟用的步驟，保留原始 1-based index 供 UI 對應
-            active = [
-                (i + 1, s) for i, s in enumerate(self._steps)
-                if s.get("enabled", True)
-            ]
-            total = len(active)
-            print(f"🚀 開始執行（共 {total} 個啟用步驟）"
-                  f"  ⚠️ 緊急停止：滑鼠移到螢幕左上角\n")
+            loop_count = 0
+            loop_mode = self._loop_var.get()
 
-            stopped_at = None
-            for orig_idx, step in active:
-                if self._stop_event.is_set():
-                    print("\n⏹ 使用者手動停止")
-                    break
+            while True:
+                loop_count += 1
+                active = [
+                    (i + 1, s) for i, s in enumerate(self._steps)
+                    if s.get("enabled", True)
+                ]
+                total = len(active)
 
-                if orig_idx < start_from:
-                    self.after(0, self._set_row_status, orig_idx, "⏭ 略過", "skipped")
-                    print(f"  ⏭️  步驟 {orig_idx:02d} 略過（已完成）")
+                if loop_mode:
+                    print(f"\n{'╔'+'═'*53}")
+                    print(f"  🔁 第 {loop_count} 輪  （共 {total} 個步驟）"
+                          f"  ⚠️ 緊急停止：滑鼠移到左上角")
+                    print(f"{'╚'+'═'*53}\n")
+                else:
+                    print(f"🚀 開始執行（共 {total} 個啟用步驟）"
+                          f"  ⚠️ 緊急停止：滑鼠移到螢幕左上角\n")
+
+                # 重置步驟狀態（第二輪起才需要）
+                if loop_count > 1:
+                    self.after(0, self._refresh_tree)
+
+                stopped_at = None
+                _start = start_from if loop_count == 1 else 1
+
+                for orig_idx, step in active:
+                    if self._stop_event.is_set():
+                        print("\n⏹ 使用者手動停止")
+                        break
+
+                    if orig_idx < _start:
+                        self.after(0, self._set_row_status, orig_idx, "⏭ 略過", "skipped")
+                        print(f"  ⏭️  步驟 {orig_idx:02d} 略過（已完成）")
+                        continue
+
+                    action_label = ACTION_LABELS.get(step["action"], step["action"])
+                    self.after(0, self._set_row_status, orig_idx, "⏳ 執行中", "running")
+                    self.after(0, self._status.config,
+                               {"text": f"第{loop_count}輪 步驟{orig_idx}/{len(self._steps)}"
+                                        if loop_mode else f"步驟 {orig_idx}/{len(self._steps)}"})
+
+                    print(f"\n{'━'*55}")
+                    print(f"  步驟 {orig_idx:02d}  {step['name']}  [{action_label}]")
+                    print(f"{'━'*55}")
+
+                    success = _run_with_retry(step)
+
+                    if success:
+                        self.after(0, self._set_row_status, orig_idx, "✅ 成功", "success")
+                    else:
+                        self.after(0, self._set_row_status, orig_idx, "❌ 失敗", "failed")
+                        print(f"\n❌ 流程在步驟 {orig_idx:02d} 停止")
+                        stopped_at = orig_idx
+                        break
+
+                # for 正常跑完（沒有 break）
+                else:
+                    print(f"\n{'═'*55}")
+                    if loop_mode:
+                        print(f"  ✅ 第 {loop_count} 輪完成，準備下一輪…")
+                    else:
+                        print(f"  ✅ 全部步驟執行完畢！")
+                    print(f"{'═'*55}")
+
+                    if not loop_mode or self._stop_event.is_set():
+                        self.after(0, self._status.config, {"text": "✅ 完成"})
+                        break
+                    # 循環模式：繼續下一輪
                     continue
 
-                action_label = ACTION_LABELS.get(step["action"], step["action"])
-                self.after(0, self._set_row_status, orig_idx, "⏳ 執行中", "running")
-                self.after(0, self._status.config,
-                           {"text": f"步驟 {orig_idx}/{len(self._steps)}"})
-
-                print(f"\n{'━'*55}")
-                print(f"  步驟 {orig_idx:02d}  {step['name']}  [{action_label}]")
-                print(f"{'━'*55}")
-
-                success = _run_with_retry(step)
-
-                if success:
-                    self.after(0, self._set_row_status, orig_idx, "✅ 成功", "success")
-                else:
-                    self.after(0, self._set_row_status, orig_idx, "❌ 失敗", "failed")
-                    print(f"\n❌ 流程在步驟 {orig_idx:02d} 停止")
-                    stopped_at = orig_idx
-                    break
-            else:
-                if not self._stop_event.is_set():
-                    print(f"\n{'═'*55}")
-                    print(f"  ✅ 全部步驟執行完畢！")
-                    print(f"{'═'*55}")
-                    self.after(0, self._status.config, {"text": "✅ 完成"})
-
-            if stopped_at:
-                self.after(0, self._status.config,
-                           {"text": f"❌ 步驟 {stopped_at} 失敗"})
-            elif self._stop_event.is_set():
-                self.after(0, self._status.config, {"text": "⏹ 已停止"})
+                # 有 break（步驟失敗或手動停止）
+                if stopped_at:
+                    self.after(0, self._status.config,
+                               {"text": f"❌ 步驟 {stopped_at} 失敗"})
+                elif self._stop_event.is_set():
+                    self.after(0, self._status.config, {"text": "⏹ 已停止"})
+                break  # 離開 while
 
         finally:
             sys.stdout = old_stdout
