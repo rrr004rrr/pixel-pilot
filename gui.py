@@ -74,8 +74,8 @@ ACTION_LABELS = {
     "rename_pdf":          "重新命名PDF",
     "run_group":           "執行群組",
 }
-ON_FAIL_OPTIONS       = ["stop", "skip", "retry"]
-ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次"]
+ON_FAIL_OPTIONS       = ["stop", "skip", "retry", "jump"]
+ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次", "跳到步驟"]
 ON_FAIL_TO_DISPLAY    = dict(zip(ON_FAIL_OPTIONS, ON_FAIL_DISPLAY))
 DISPLAY_TO_ON_FAIL    = dict(zip(ON_FAIL_DISPLAY, ON_FAIL_OPTIONS))
 
@@ -327,6 +327,12 @@ def _execute(step: dict) -> bool:
     return False
 
 
+class _JumpTo(Exception):
+    """失敗行為 = jump 時拋出，攜帶目標步驟編號（1-based）。"""
+    def __init__(self, step_no: int):
+        self.step_no = step_no
+
+
 def _run_with_retry(step: dict) -> bool:
     on_fail = step.get("on_fail", "stop")
     try:
@@ -344,13 +350,25 @@ def _run_with_retry(step: dict) -> bool:
                 print("  ✅ 重試成功")
                 return True
             print("  ❌ 重試仍失敗")
+        elif on_fail == "jump":
+            jump_to = int(step.get("jump_to", 1))
+            print(f"  ↪️  失敗，跳到步驟 {jump_to}")
+            raise _JumpTo(jump_to)
         return False
 
+    except _JumpTo:
+        raise
     except FileNotFoundError as e:
         print(f"  ❌ 找不到截圖：{e}")
-        return on_fail == "skip"
+        if on_fail == "skip":
+            return True
+        if on_fail == "jump":
+            raise _JumpTo(int(step.get("jump_to", 1)))
+        return False
     except Exception as e:
         print(f"  ❌ 錯誤：{e}")
+        if on_fail == "jump":
+            raise _JumpTo(int(step.get("jump_to", 1)))
         return False
 
 
@@ -533,9 +551,21 @@ class StepDialog(tk.Toplevel):
         tk.Label(f, text="失敗行為", width=10, anchor="e").pack(side=tk.LEFT)
         self._on_fail_var = tk.StringVar(
             value=ON_FAIL_TO_DISPLAY.get(s.get("on_fail", "stop"), "停止"))
-        ttk.Combobox(f, textvariable=self._on_fail_var,
+        _on_fail_cb = ttk.Combobox(f, textvariable=self._on_fail_var,
                      values=ON_FAIL_DISPLAY, state="readonly",
-                     width=10).pack(side=tk.LEFT, padx=(4, 0))
+                     width=10)
+        _on_fail_cb.pack(side=tk.LEFT, padx=(4, 0))
+        _on_fail_cb.bind("<<ComboboxSelected>>", self._on_fail_change)
+
+        # ── 固定欄位：跳到步驟（失敗行為 = 跳到步驟 時顯示）──
+        self._jump_frame = tk.Frame(self)
+        tk.Label(self._jump_frame, text="跳到步驟", width=10, anchor="e").pack(side=tk.LEFT)
+        self._jump_to = tk.Spinbox(self._jump_frame, from_=1, to=999, increment=1, width=6)
+        self._jump_to.delete(0, tk.END)
+        self._jump_to.insert(0, str(s.get("jump_to", 1)))
+        self._jump_to.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(self._jump_frame, text="（步驟編號，從 1 開始）",
+                 fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=4)
 
         # ── 固定欄位：啟用 ──
         self._enabled_var = tk.BooleanVar(value=s.get("enabled", True))
@@ -550,6 +580,7 @@ class StepDialog(tk.Toplevel):
                   command=self.destroy).pack(side=tk.LEFT, padx=6)
 
         self._on_action_change()
+        self._on_fail_change()
         self.wait_window()
 
     # ── 動態顯示/隱藏欄位群組 ──────────────────────────────
@@ -615,6 +646,15 @@ class StepDialog(tk.Toplevel):
             hide(self._timeout_frame)
 
         # 重新計算視窗大小
+        self.update_idletasks()
+        self.geometry("")
+
+    def _on_fail_change(self, *_):
+        PAD = {"fill": tk.X, "padx": 10, "pady": 3}
+        if self._on_fail_var.get() == "跳到步驟":
+            self._jump_frame.pack(PAD)
+        else:
+            self._jump_frame.pack_forget()
         self.update_idletasks()
         self.geometry("")
 
@@ -743,6 +783,7 @@ class StepDialog(tk.Toplevel):
             "templates":     list(self._tmpl_listbox.get(0, tk.END)),
             "template":      self._tmpl_listbox.get(0) if self._tmpl_listbox.size() else "",
             "on_fail":       DISPLAY_TO_ON_FAIL.get(self._on_fail_var.get(), self._on_fail_var.get()),
+            "jump_to":       int(self._jump_to.get() or 1),
             "enabled":       self._enabled_var.get(),
             "timeout":       float(self._timeout.get() or 10),
             "confidence":    float(self._conf.get() or 0.8),
@@ -1134,7 +1175,8 @@ class App(tk.Tk):
                     s["name"],
                     ACTION_LABELS.get(s["action"], s["action"]),
                     _tmpl_display(s),
-                    s.get("on_fail", "stop"),
+                    (ON_FAIL_TO_DISPLAY.get(s.get("on_fail", "stop"), s.get("on_fail", "stop"))
+                     + (f"→{s['jump_to']}" if s.get("on_fail") == "jump" else "")),
                     "⏸ 等待",
                 ),
                 tags=("waiting" if enabled else "disabled",),
@@ -1356,7 +1398,12 @@ class App(tk.Tk):
                 stopped_at = None
                 _start = start_from if loop_count == 1 else 1
 
-                for orig_idx, step in active:
+                # 用 while + index 以支援 jump 跳轉
+                ai = 0
+                completed = False
+                while ai < len(active):
+                    orig_idx, step = active[ai]
+
                     if self._stop_event.is_set():
                         print("\n⏹ 使用者手動停止")
                         break
@@ -1364,6 +1411,7 @@ class App(tk.Tk):
                     if orig_idx < _start:
                         self.after(0, self._set_row_status, orig_idx, "⏭ 略過", "skipped")
                         print(f"  ⏭️  步驟 {orig_idx:02d} 略過（已完成）")
+                        ai += 1
                         continue
 
                     action_label = ACTION_LABELS.get(step["action"], step["action"])
@@ -1376,18 +1424,32 @@ class App(tk.Tk):
                     print(f"  步驟 {orig_idx:02d}  {step['name']}  [{action_label}]")
                     print(f"{'━'*55}")
 
-                    success = _run_with_retry(step)
+                    try:
+                        success = _run_with_retry(step)
+                    except _JumpTo as jmp:
+                        self.after(0, self._set_row_status, orig_idx, "↪️ 跳轉", "skipped")
+                        # 找目標步驟在 active 中的 index
+                        target = next((i for i, (idx, _) in enumerate(active)
+                                       if idx == jmp.step_no), None)
+                        if target is None:
+                            print(f"\n❌ 跳轉目標步驟 {jmp.step_no} 不存在，停止")
+                            stopped_at = orig_idx
+                            break
+                        ai = target
+                        continue
 
                     if success:
                         self.after(0, self._set_row_status, orig_idx, "✅ 成功", "success")
+                        ai += 1
                     else:
                         self.after(0, self._set_row_status, orig_idx, "❌ 失敗", "failed")
                         print(f"\n❌ 流程在步驟 {orig_idx:02d} 停止")
                         stopped_at = orig_idx
                         break
-
-                # for 正常跑完（沒有 break）
                 else:
+                    completed = True
+
+                if completed:
                     print(f"\n{'═'*55}")
                     if loop_mode:
                         print(f"  ✅ 第 {loop_count} 輪完成，準備下一輪…")
