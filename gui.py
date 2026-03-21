@@ -170,17 +170,10 @@ DOWNLOAD_PDF_NAME = "TodoNow • 让工作快起来.pdf"
 
 def _rename_pdfs_in_folder(folder: str) -> bool:
     """
-    找到固定下載名稱的 PDF，擷取第一行文字作為新檔名並重新命名。
-    先改成暫存亂數名稱，確認目標不存在後再改成最終名稱。
+    找到固定下載名稱的 PDF，直接以檔案內容 MD5 hash 命名。
     回傳 True = 成功；False = 找不到檔案或失敗。
     """
-    try:
-        import pdfplumber
-    except ImportError:
-        print("  ❌ 缺少套件，請執行：pip install pdfplumber")
-        return False
-
-    import re, uuid
+    import hashlib
     folder_path = Path(folder)
     if not folder_path.exists():
         print(f"  ❌ 找不到資料夾：{folder}")
@@ -191,33 +184,13 @@ def _rename_pdfs_in_folder(folder: str) -> bool:
         print(f"  ❌ 找不到檔案：{DOWNLOAD_PDF_NAME}")
         return False
 
-    _INVALID = re.compile(r'[\\/:*?"<>|]')
-
     try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            text = pdf.pages[0].extract_text() or ""
-        first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
-        if not first_line:
-            print(f"  ❌ 無法擷取文字：{DOWNLOAD_PDF_NAME}")
-            return False
-
-        new_name = _INVALID.sub("_", first_line) + ".pdf"
-        new_path = folder_path / new_name
-
-        # 先改成亂數暫存名，再改成目標名稱
-        tmp_path = folder_path / f"_tmp_{uuid.uuid4().hex}.pdf"
-        pdf_path.rename(tmp_path)
-
-        if new_path.exists():
-            tmp_path.rename(pdf_path)  # 還原
-            print(f"  ⚠️  目標已存在，略過：{new_name}")
-            return False
-
-        tmp_path.rename(new_path)
+        md5 = hashlib.md5(pdf_path.read_bytes()).hexdigest()
+        new_path = folder_path / f"{md5}.pdf"
+        pdf_path.rename(new_path)
         print(f"  ✅ {DOWNLOAD_PDF_NAME}")
-        print(f"     → {new_name}")
+        print(f"     → {new_path.name}")
         return True
-
     except Exception as e:
         print(f"  ❌ {DOWNLOAD_PDF_NAME}：{e}")
         return False
