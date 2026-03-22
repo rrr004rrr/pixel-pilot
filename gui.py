@@ -73,6 +73,7 @@ ACTION_LABELS = {
     "sleep":               "等待(秒)",
     "rename_pdf":          "重新命名PDF",
     "run_group":           "執行群組",
+    "goto":                "跳到步驟",
 }
 ON_FAIL_OPTIONS       = ["stop", "skip", "retry", "retry_inf", "jump"]
 ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次", "無限重試", "跳到步驟"]
@@ -98,6 +99,7 @@ _NEEDS_CLICK_TYPE = {"click_xy"}
 _NEEDS_FOLDER     = {"rename_pdf"}
 _NEEDS_GROUP      = {"run_group"}
 _NEEDS_OFFSET     = {"find_and_click"}
+_NEEDS_GOTO       = {"goto"}
 
 
 # ════════════════════════════════════════════════════════════
@@ -324,6 +326,10 @@ def _execute(step: dict) -> bool:
             pyautogui.scroll(amount)
             print(f"  🖱️  滾輪 {direction} {abs(amount)} 格（目前滑鼠位置）")
         return True
+    elif action == "goto":
+        target = int(step.get("jump_to", 1))
+        print(f"  ↪️  跳到步驟 {target}")
+        raise _JumpTo(target)
     return False
 
 
@@ -662,13 +668,17 @@ class StepDialog(tk.Toplevel):
         else:
             hide(self._timeout_frame)
 
+        # goto 動作的目標步驟（與 on_fail=jump 共用同一個 frame）
+        self._on_fail_change()
+
         # 重新計算視窗大小
         self.update_idletasks()
         self.geometry("")
 
     def _on_fail_change(self, *_):
         PAD = {"fill": tk.X, "padx": 10, "pady": 3}
-        if self._on_fail_var.get() == "跳到步驟":
+        action = DISPLAY_TO_ACTION.get(self._action_var.get(), self._action_var.get())
+        if self._on_fail_var.get() == "跳到步驟" or action in _NEEDS_GOTO:
             self._jump_frame.pack(PAD)
         else:
             self._jump_frame.pack_forget()
