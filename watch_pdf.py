@@ -2,8 +2,8 @@
 watch_pdf.py — 監控資料夾，自動將下載的 PDF 重新命名為標題內容
 
 用法：
-    python watch_pdf.py <監控資料夾>
-    python watch_pdf.py "C:/Users/xxx/Downloads/TODOPDF"
+    python watch_pdf.py                        # 監控預設資料夾
+    python watch_pdf.py "D:/TODOPDF"           # 監控指定資料夾
 
 依賴：
     pip install watchdog pdfplumber
@@ -23,8 +23,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ── 設定 ────────────────────────────────────────────────────
+DEFAULT_FOLDER    = r"D:\TODOPDF"
 DOWNLOAD_PDF_NAME = "TodoNow • 让工作快起来.pdf"
-_INVALID = re.compile(r'[\\/:*?"<>|]')
+POLL_INTERVAL     = 2.0   # 輪詢間隔（秒），作為 watchdog 的備援
+_INVALID          = re.compile(r'[\\/:*?"<>|]')
+# ────────────────────────────────────────────────────────────
 
 
 def rename_pdf(folder: Path, pdf_path: Path) -> bool:
@@ -48,7 +52,6 @@ def rename_pdf(folder: Path, pdf_path: Path) -> bool:
         new_name = _INVALID.sub("_", first_line) + ".pdf"
         new_path = folder / new_name
 
-        # 先改成暫存亂數名，避免目標名稱衝突
         tmp_path = folder / f"_tmp_{uuid.uuid4().hex}.pdf"
         pdf_path.rename(tmp_path)
 
@@ -82,52 +85,75 @@ def _wait_until_stable(path: Path, interval: float = 0.5, max_wait: float = 30.0
         elapsed += interval
 
 
+def _check_and_rename(folder: Path):
+    """若目標檔案存在就處理，不存在則略過。"""
+    pdf_path = folder / DOWNLOAD_PDF_NAME
+    if pdf_path.exists():
+        log.info("🔎 發現目標檔案，準備重新命名...")
+        _wait_until_stable(pdf_path)
+        rename_pdf(folder, pdf_path)
+
+
 def watch(folder: Path):
     try:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
+        use_watchdog = True
     except ImportError:
-        log.error("缺少 watchdog，請執行：pip install watchdog")
-        sys.exit(1)
+        log.warning("未安裝 watchdog（pip install watchdog），改用輪詢模式")
+        use_watchdog = False
 
-    class _Handler(FileSystemEventHandler):
-        def _handle(self, path: Path):
-            if path.name == DOWNLOAD_PDF_NAME:
-                _wait_until_stable(path)
-                rename_pdf(folder, path)
+    # 啟動時先掃一次，處理已存在的檔案
+    _check_and_rename(folder)
 
-        def on_created(self, event):
-            if not event.is_directory:
-                self._handle(Path(event.src_path))
+    if use_watchdog:
+        class _Handler(FileSystemEventHandler):
+            def _handle(self, path: Path):
+                if path.name == DOWNLOAD_PDF_NAME:
+                    _wait_until_stable(path)
+                    rename_pdf(folder, path)
 
-        def on_moved(self, event):
-            if not event.is_directory:
-                self._handle(Path(event.dest_path))
+            def on_created(self, event):
+                if not event.is_directory:
+                    self._handle(Path(event.src_path))
 
-    observer = Observer()
-    observer.schedule(_Handler(), str(folder), recursive=False)
-    observer.start()
-    log.info("👀 監控中：%s", folder)
+            def on_modified(self, event):
+                if not event.is_directory:
+                    self._handle(Path(event.src_path))
+
+            def on_moved(self, event):
+                if not event.is_directory:
+                    self._handle(Path(event.dest_path))
+
+        observer = Observer()
+        observer.schedule(_Handler(), str(folder), recursive=False)
+        observer.start()
+        log.info("👀 監控中（watchdog + 輪詢）：%s", folder)
+    else:
+        observer = None
+        log.info("👀 監控中（輪詢）：%s", folder)
+
     log.info("   目標檔名：%s", DOWNLOAD_PDF_NAME)
     log.info("   按 Ctrl+C 停止")
 
     try:
-        while observer.is_alive():
-            time.sleep(1)
+        while True:
+            time.sleep(POLL_INTERVAL)
+            # 輪詢備援：watchdog 萬一漏掉事件也能補救
+            _check_and_rename(folder)
     except KeyboardInterrupt:
         pass
     finally:
-        observer.stop()
-        observer.join()
+        if observer:
+            observer.stop()
+            observer.join()
         log.info("⏹ 已停止")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法：python watch_pdf.py <監控資料夾>")
-        sys.exit(1)
+    folder_arg = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_FOLDER
+    folder = Path(folder_arg).expanduser().resolve()
 
-    folder = Path(sys.argv[1]).expanduser().resolve()
     if not folder.exists():
         log.error("找不到資料夾：%s", folder)
         sys.exit(1)
