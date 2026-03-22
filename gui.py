@@ -74,8 +74,8 @@ ACTION_LABELS = {
     "rename_pdf":          "重新命名PDF",
     "run_group":           "執行群組",
 }
-ON_FAIL_OPTIONS       = ["stop", "skip", "retry", "jump"]
-ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次", "跳到步驟"]
+ON_FAIL_OPTIONS       = ["stop", "skip", "retry", "retry_inf", "jump"]
+ON_FAIL_DISPLAY       = ["停止", "跳過", "重試一次", "無限重試", "跳到步驟"]
 ON_FAIL_TO_DISPLAY    = dict(zip(ON_FAIL_OPTIONS, ON_FAIL_DISPLAY))
 DISPLAY_TO_ON_FAIL    = dict(zip(ON_FAIL_DISPLAY, ON_FAIL_OPTIONS))
 
@@ -333,43 +333,55 @@ class _JumpTo(Exception):
         self.step_no = step_no
 
 
-def _run_with_retry(step: dict) -> bool:
+def _run_with_retry(step: dict, stop_event=None) -> bool:
     on_fail = step.get("on_fail", "stop")
-    try:
-        if _execute(step):
-            print("  ✅ 成功")
-            return True
 
-        if on_fail == "skip":
-            print("  ⚠️  失敗，跳過（on_fail=skip）")
-            return True
-        elif on_fail == "retry":
-            print("  🔄 失敗，重試一次...")
-            time.sleep(1)
+    def _try_once():
+        try:
             if _execute(step):
-                print("  ✅ 重試成功")
-                return True
-            print("  ❌ 重試仍失敗")
-        elif on_fail == "jump":
-            jump_to = int(step.get("jump_to", 1))
-            print(f"  ↪️  失敗，跳到步驟 {jump_to}")
-            raise _JumpTo(jump_to)
-        return False
+                print("  ✅ 成功")
+                return True, None
+            return False, None
+        except _JumpTo:
+            raise
+        except FileNotFoundError as e:
+            print(f"  ❌ 找不到截圖：{e}")
+            return False, None
+        except Exception as e:
+            print(f"  ❌ 錯誤：{e}")
+            return False, None
 
-    except _JumpTo:
-        raise
-    except FileNotFoundError as e:
-        print(f"  ❌ 找不到截圖：{e}")
-        if on_fail == "skip":
+    success, _ = _try_once()
+    if success:
+        return True
+
+    if on_fail == "skip":
+        print("  ⚠️  失敗，跳過（on_fail=skip）")
+        return True
+    elif on_fail == "retry":
+        print("  🔄 失敗，重試一次...")
+        time.sleep(1)
+        success, _ = _try_once()
+        if success:
             return True
-        if on_fail == "jump":
-            raise _JumpTo(int(step.get("jump_to", 1)))
-        return False
-    except Exception as e:
-        print(f"  ❌ 錯誤：{e}")
-        if on_fail == "jump":
-            raise _JumpTo(int(step.get("jump_to", 1)))
-        return False
+        print("  ❌ 重試仍失敗")
+    elif on_fail == "retry_inf":
+        attempt = 1
+        while True:
+            if stop_event and stop_event.is_set():
+                print("  ⏹ 無限重試中斷（使用者停止）")
+                return False
+            print(f"  🔄 第 {attempt} 次重試...")
+            time.sleep(1)
+            attempt += 1
+            success, _ = _try_once()
+            if success:
+                return True
+    elif on_fail == "jump":
+        jump_to = int(step.get("jump_to", 1))
+        print(f"  ↪️  失敗，跳到步驟 {jump_to}")
+        raise _JumpTo(jump_to)
+    return False
 
 
 # ════════════════════════════════════════════════════════════
@@ -1425,7 +1437,7 @@ class App(tk.Tk):
                     print(f"{'━'*55}")
 
                     try:
-                        success = _run_with_retry(step)
+                        success = _run_with_retry(step, self._stop_event)
                     except _JumpTo as jmp:
                         self.after(0, self._set_row_status, orig_idx, "↪️ 跳轉", "skipped")
                         # 找目標步驟在 active 中的 index
