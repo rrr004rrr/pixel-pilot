@@ -306,15 +306,31 @@ def _execute(step: dict) -> bool:
             return False
         group_steps = groups[group_name]
         print(f"  📦 執行群組「{group_name}」（{len(group_steps)} 個步驟）")
-        for gs in group_steps:
+        # 用 while + index 支援群組內跳轉（jump_to = 群組內第幾步，1-based）
+        gi = 0
+        while gi < len(group_steps):
+            gs = group_steps[gi]
             if not gs.get("enabled", True):
+                gi += 1
                 continue
             al = ACTION_LABELS.get(gs["action"], gs["action"])
             print(f"\n  ├─ {gs['name']}  [{al}]")
-            if not _run_with_retry(gs):
+            try:
+                ok = _run_with_retry(gs)
+            except _JumpTo as jmp:
+                target = jmp.step_no - 1  # 轉成 0-based
+                if 0 <= target < len(group_steps):
+                    print(f"  ↪️  群組內跳到第 {jmp.step_no} 步")
+                    gi = target
+                    continue
+                else:
+                    print(f"  ❌ 群組內跳轉目標 {jmp.step_no} 不存在")
+                    return False
+            if not ok:
                 print(f"  └─ ❌ 失敗")
                 return False
             print(f"  └─ ✅")
+            gi += 1
         return True
     elif action == "scroll":
         amount = int(step.get("scroll_amount", 3))
