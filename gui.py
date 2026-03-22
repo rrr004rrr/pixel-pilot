@@ -372,7 +372,12 @@ def _run_with_retry(step: dict, stop_event=None) -> bool:
                 print("  ⏹ 無限重試中斷（使用者停止）")
                 return False
             print(f"  🔄 第 {attempt} 次重試...")
-            time.sleep(1)
+            # 分成 0.1 秒小段等待，每段都檢查停止事件
+            for _ in range(10):
+                if stop_event and stop_event.is_set():
+                    print("  ⏹ 無限重試中斷（使用者停止）")
+                    return False
+                time.sleep(0.1)
             attempt += 1
             success, _ = _try_once()
             if success:
