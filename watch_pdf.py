@@ -58,15 +58,11 @@ def rename_pdf(folder: Path, pdf_path: Path) -> bool:
             log.info("ℹ️  已是正確檔名，略過：%s", pdf_path.name)
             return True
 
-        tmp_path = folder / f"_tmp_{uuid.uuid4().hex}.pdf"
-        pdf_path.rename(tmp_path)
-
         if new_path.exists():
-            tmp_path.rename(pdf_path)  # 還原
-            log.warning("⚠️  目標已存在，略過：%s", new_name)
-            return False
+            log.info("ℹ️  目標已存在，略過：%s → %s", pdf_path.name, new_name)
+            return True
 
-        tmp_path.rename(new_path)
+        pdf_path.rename(new_path)
         log.info("✅ %s → %s", pdf_path.name, new_name)
         return True
 
