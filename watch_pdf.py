@@ -5,7 +5,8 @@ watch_pdf.py — 監控資料夾，自動將下載的 PDF 重新命名為標題�
     python watch_pdf.py                        # 監控預設資料夾
     python watch_pdf.py "D:/TODOPDF"           # 監控指定資料夾
     python watch_pdf.py -all                   # 強制重新命名資料夾內所有 PDF，然後退出
-    python watch_pdf.py "D:/TODOPDF" -all      # 指定資料夾 + 強制全部重命名
+    python watch_pdf.py -dedup                 # 刪除重複 PDF（同標題只保留一個），然後退出
+    python watch_pdf.py "D:/TODOPDF" -dedup    # 指定資料夾 + 去重
 
 依賴：
     pip install watchdog pdfplumber
@@ -18,6 +19,10 @@ import time
 import logging
 import warnings
 from pathlib import Path
+
+# 抑制 pdfminer / pdfplumber 的 FontBBox 等低層警告
+for _noisy in ("pdfminer", "pdfplumber"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -166,10 +171,47 @@ def watch(folder: Path):
         log.info("⏹ 已停止")
 
 
+def dedup(folder: Path):
+    """掃描所有 PDF，同標題只保留第一個，其餘刪除。"""
+    try:
+        import pdfplumber
+    except ImportError:
+        log.error("缺少 pdfplumber，請執行：pip install pdfplumber")
+        return
+
+    pdfs = sorted(folder.glob("*.pdf"))
+    log.info("共 %d 個 PDF，開始去重...", len(pdfs))
+
+    seen: dict[str, Path] = {}   # normalized title → 保留的檔案
+    deleted = 0
+
+    for p in pdfs:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pdfplumber.open(str(p)) as pdf:
+                    text = pdf.pages[0].extract_text() or ""
+            first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
+            if not first_line:
+                continue  # 無文字層，不處理
+            key = first_line.lower()
+            if key in seen:
+                p.unlink()
+                deleted += 1
+                log.info("🗑️  刪除重複：%s  (保留 %s)", p.name, seen[key].name)
+            else:
+                seen[key] = p
+        except Exception as e:
+            log.warning("跳過 %s：%s", p.name, e)
+
+    log.info("完成：刪除 %d 個重複 PDF，保留 %d 個", deleted, len(seen))
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
-    force_all = "-all" in args
-    args = [a for a in args if a != "-all"]
+    force_all  = "-all"   in args
+    force_dedup = "-dedup" in args
+    args = [a for a in args if a not in ("-all", "-dedup")]
 
     folder_arg = args[0] if args else DEFAULT_FOLDER
     folder = Path(folder_arg).expanduser().resolve()
@@ -178,7 +220,9 @@ if __name__ == "__main__":
         log.error("找不到資料夾：%s", folder)
         sys.exit(1)
 
-    if force_all:
+    if force_dedup:
+        dedup(folder)
+    elif force_all:
         rename_all(folder)
     else:
         watch(folder)
