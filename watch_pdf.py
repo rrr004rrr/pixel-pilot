@@ -16,6 +16,7 @@ import re
 import uuid
 import time
 import logging
+import warnings
 from pathlib import Path
 
 logging.basicConfig(
@@ -44,8 +45,10 @@ def rename_pdf(folder: Path, pdf_path: Path) -> bool:
         return False
 
     try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            text = pdf.pages[0].extract_text() or ""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                text = pdf.pages[0].extract_text() or ""
         first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
         if not first_line:
             log.warning("⚠️  無法擷取文字：%s", pdf_path.name)
