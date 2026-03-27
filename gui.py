@@ -254,9 +254,11 @@ def _execute(step: dict) -> bool:
     # ── 限定偵測區域（暫時覆蓋全域 capture region）──
     _orig_region = ac._capture_region
     if step.get("step_region_enabled"):
+        base_x = _orig_region[0] if _orig_region else 0
+        base_y = _orig_region[1] if _orig_region else 0
         ac.set_capture_region((
-            int(step.get("step_region_x", 0)),
-            int(step.get("step_region_y", 0)),
+            base_x + int(step.get("step_region_x", 0)),
+            base_y + int(step.get("step_region_y", 0)),
             int(step.get("step_region_w", 200)),
             int(step.get("step_region_h", 200)),
         ))
@@ -588,7 +590,7 @@ class StepDialog(tk.Toplevel):
             sp.insert(0, str(s.get(key, default)))
             sp.pack(side=tk.LEFT)
             setattr(self, f"_sr_{label.lower()}", sp)
-        tk.Label(self._sr_detail, text="（螢幕絕對座標）",
+        tk.Label(self._sr_detail, text="（相對於偵測視窗左上角）",
                  fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=4)
 
         # ── 可切換群組：自動調降相似度 ──
