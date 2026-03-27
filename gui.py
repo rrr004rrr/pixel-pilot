@@ -51,6 +51,23 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int]:
 
 STEPS_FILE  = "steps.json"
 GROUPS_FILE = "groups.json"
+CONFIG_FILE = "config.json"
+
+
+def load_config() -> dict:
+    p = Path(CONFIG_FILE)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(data: dict):
+    Path(CONFIG_FILE).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 ACTIONS = [
     "find_and_click",
@@ -234,119 +251,151 @@ def _execute(step: dict) -> bool:
     offset_y    = int(step.get("offset_y", 0))
     color_center = bool(step.get("click_color_center", False))
 
-    if action == "find_and_click":
-        if len(templates) > 1:
-            result = _find_any(templates, conf, timeout)
-            if result is None:
+    # ── 限定偵測區域（暫時覆蓋全域 capture region）──
+    _orig_region = ac._capture_region
+    if step.get("step_region_enabled"):
+        ac.set_capture_region((
+            int(step.get("step_region_x", 0)),
+            int(step.get("step_region_y", 0)),
+            int(step.get("step_region_w", 200)),
+            int(step.get("step_region_h", 200)),
+        ))
+
+    # ── 自動調降相似度的輔助函數 ──
+    auto_conf     = bool(step.get("auto_confidence", False))
+    conf_min      = float(step.get("confidence_min", 0.5))
+    conf_step     = 0.05
+
+    def _try_with_auto_conf(fn):
+        """執行 fn(conf)；若失敗且啟用自動調降，逐步降低 conf 重試。"""
+        c = conf
+        while True:
+            result = fn(c)
+            if result:
+                return result
+            if not auto_conf or round(c - conf_step, 2) < conf_min:
+                return result
+            c = round(c - conf_step, 2)
+            print(f"  🔽 相似度調降至 {c:.2f}，重試...")
+
+    try:
+        if action == "find_and_click":
+            if len(templates) > 1:
+                result = _try_with_auto_conf(
+                    lambda c: _find_any(templates, c, timeout))
+                if result is None:
+                    return False
+                _, cx, cy = result
+                pyautogui.click(cx + offset_x, cy + offset_y)
+                print(f"  🖱️  左鍵 點擊 ({cx + offset_x}, {cy + offset_y})")
+                return True
+            return bool(_try_with_auto_conf(
+                lambda c: ac.find_and_click(tmpl, confidence=c, wait_timeout=timeout,
+                                            offset_x=offset_x, offset_y=offset_y,
+                                            click_color_center=color_center)))
+        elif action == "wait_for_image":
+            if len(templates) > 1:
+                return _try_with_auto_conf(
+                    lambda c: _find_any(templates, c, timeout)) is not None
+            return bool(_try_with_auto_conf(
+                lambda c: ac.wait_for_image(tmpl, confidence=c, timeout=timeout)))
+        elif action == "wait_for_image_gone":
+            if len(templates) > 1:
+                names = " / ".join(Path(t).name for t in templates)
+                print(f"  ⏳ 等待全部消失：{names}")
+                start = time.time()
+                while True:
+                    remaining = [t for t in templates if ac.image_exists(t, confidence=conf)]
+                    if not remaining:
+                        print(f"  ✅ 全部已消失")
+                        return True
+                    if time.time() - start >= timeout:
+                        still = " / ".join(Path(t).name for t in remaining)
+                        print(f"  ⏰ 超時，仍存在：{still}")
+                        return False
+                    time.sleep(0.3)
+            return ac.wait_for_image_gone(tmpl, confidence=conf, timeout=timeout)
+        elif action == "image_exists":
+            if len(templates) > 1:
+                for t in templates:
+                    if ac.image_exists(t, confidence=conf):
+                        print(f"  ✅ 確認存在：{Path(t).name}")
+                        return True
+                print(f"  ❌ 全部不存在：{' / '.join(Path(t).name for t in templates)}")
                 return False
-            _, cx, cy = result
-            pyautogui.click(cx + offset_x, cy + offset_y)
-            print(f"  🖱️  左鍵 點擊 ({cx + offset_x}, {cy + offset_y})")
+            ok = ac.image_exists(tmpl, confidence=conf)
+            print(f"  {'✅ 確認存在' if ok else '❌ 不存在'}：{Path(tmpl).name}")
+            return ok
+        elif action == "sleep":
+            ac.sleep(timeout, name)
             return True
-        return bool(ac.find_and_click(tmpl, confidence=conf, wait_timeout=timeout,
-                                      offset_x=offset_x, offset_y=offset_y,
-                                      click_color_center=color_center))
-    elif action == "wait_for_image":
-        if len(templates) > 1:
-            return _find_any(templates, conf, timeout) is not None
-        return ac.wait_for_image(tmpl, confidence=conf, timeout=timeout)
-    elif action == "wait_for_image_gone":
-        if len(templates) > 1:
-            # 等待全部消失
-            names = " / ".join(Path(t).name for t in templates)
-            print(f"  ⏳ 等待全部消失：{names}")
-            start = time.time()
-            while True:
-                remaining = [t for t in templates if ac.image_exists(t, confidence=conf)]
-                if not remaining:
-                    print(f"  ✅ 全部已消失")
-                    return True
-                if time.time() - start >= timeout:
-                    still = " / ".join(Path(t).name for t in remaining)
-                    print(f"  ⏰ 超時，仍存在：{still}")
-                    return False
-                time.sleep(0.3)
-        return ac.wait_for_image_gone(tmpl, confidence=conf, timeout=timeout)
-    elif action == "image_exists":
-        if len(templates) > 1:
-            for t in templates:
-                if ac.image_exists(t, confidence=conf):
-                    print(f"  ✅ 確認存在：{Path(t).name}")
-                    return True
-            print(f"  ❌ 全部不存在：{' / '.join(Path(t).name for t in templates)}")
-            return False
-        ok = ac.image_exists(tmpl, confidence=conf)
-        print(f"  {'✅ 確認存在' if ok else '❌ 不存在'}：{Path(tmpl).name}")
-        return ok
-    elif action == "sleep":
-        ac.sleep(timeout, name)
-        return True
-    elif action == "move":
-        pyautogui.moveTo(x, y)
-        print(f"  🖱️  移動到 ({x}, {y})")
-        return True
-    elif action == "click_xy":
-        click_type = step.get("click_type", "left")
-        if click_type == "right":
-            pyautogui.rightClick(x, y)
-        elif click_type == "double":
-            pyautogui.doubleClick(x, y)
-        else:
-            pyautogui.click(x, y)
-        label = CLICK_TYPE_LABELS.get(click_type, click_type)
-        print(f"  🖱️  {label} 點擊 ({x}, {y})")
-        return True
-    elif action == "rename_pdf":
-        return _rename_pdfs_in_folder(step.get("folder", ""))
-    elif action == "run_group":
-        group_name = step.get("group", "")
-        groups = load_groups()
-        if group_name not in groups:
-            print(f"  ❌ 找不到群組：{group_name}")
-            return False
-        group_steps = groups[group_name]
-        print(f"  📦 執行群組「{group_name}」（{len(group_steps)} 個步驟）")
-        # 用 while + index 支援群組內跳轉（jump_to = 群組內第幾步，1-based）
-        gi = 0
-        while gi < len(group_steps):
-            gs = group_steps[gi]
-            if not gs.get("enabled", True):
-                gi += 1
-                continue
-            al = ACTION_LABELS.get(gs["action"], gs["action"])
-            print(f"\n  ├─ {gs['name']}  [{al}]")
-            try:
-                ok = _run_with_retry(gs)
-            except _JumpTo as jmp:
-                target = jmp.step_no - 1  # 轉成 0-based
-                if 0 <= target < len(group_steps):
-                    print(f"  ↪️  群組內跳到第 {jmp.step_no} 步")
-                    gi = target
-                    continue
-                else:
-                    print(f"  ❌ 群組內跳轉目標 {jmp.step_no} 不存在")
-                    return False
-            if not ok:
-                print(f"  └─ ❌ 失敗")
+        elif action == "move":
+            pyautogui.moveTo(x, y)
+            print(f"  🖱️  移動到 ({x}, {y})")
+            return True
+        elif action == "click_xy":
+            click_type = step.get("click_type", "left")
+            if click_type == "right":
+                pyautogui.rightClick(x, y)
+            elif click_type == "double":
+                pyautogui.doubleClick(x, y)
+            else:
+                pyautogui.click(x, y)
+            label = CLICK_TYPE_LABELS.get(click_type, click_type)
+            print(f"  🖱️  {label} 點擊 ({x}, {y})")
+            return True
+        elif action == "rename_pdf":
+            return _rename_pdfs_in_folder(step.get("folder", ""))
+        elif action == "run_group":
+            group_name = step.get("group", "")
+            groups = load_groups()
+            if group_name not in groups:
+                print(f"  ❌ 找不到群組：{group_name}")
                 return False
-            print(f"  └─ ✅")
-            gi += 1
-        return True
-    elif action == "scroll":
-        amount = int(step.get("scroll_amount", 3))
-        direction = "向上" if amount > 0 else "向下"
-        if x or y:
-            pyautogui.scroll(amount, x=x, y=y)
-            print(f"  🖱️  滾輪 {direction} {abs(amount)} 格，位置 ({x}, {y})")
-        else:
-            pyautogui.scroll(amount)
-            print(f"  🖱️  滾輪 {direction} {abs(amount)} 格（目前滑鼠位置）")
-        return True
-    elif action == "goto":
-        target = int(step.get("jump_to", 1))
-        print(f"  ↪️  跳到步驟 {target}")
-        raise _JumpTo(target)
-    return False
+            group_steps = groups[group_name]
+            print(f"  📦 執行群組「{group_name}」（{len(group_steps)} 個步驟）")
+            gi = 0
+            while gi < len(group_steps):
+                gs = group_steps[gi]
+                if not gs.get("enabled", True):
+                    gi += 1
+                    continue
+                al = ACTION_LABELS.get(gs["action"], gs["action"])
+                print(f"\n  ├─ {gs['name']}  [{al}]")
+                try:
+                    ok = _run_with_retry(gs)
+                except _JumpTo as jmp:
+                    target = jmp.step_no - 1
+                    if 0 <= target < len(group_steps):
+                        print(f"  ↪️  群組內跳到第 {jmp.step_no} 步")
+                        gi = target
+                        continue
+                    else:
+                        print(f"  ❌ 群組內跳轉目標 {jmp.step_no} 不存在")
+                        return False
+                if not ok:
+                    print(f"  └─ ❌ 失敗")
+                    return False
+                print(f"  └─ ✅")
+                gi += 1
+            return True
+        elif action == "scroll":
+            amount = int(step.get("scroll_amount", 3))
+            direction = "向上" if amount > 0 else "向下"
+            if x or y:
+                pyautogui.scroll(amount, x=x, y=y)
+                print(f"  🖱️  滾輪 {direction} {abs(amount)} 格，位置 ({x}, {y})")
+            else:
+                pyautogui.scroll(amount)
+                print(f"  🖱️  滾輪 {direction} {abs(amount)} 格（目前滑鼠位置）")
+            return True
+        elif action == "goto":
+            target = int(step.get("jump_to", 1))
+            print(f"  ↪️  跳到步驟 {target}")
+            raise _JumpTo(target)
+        return False
+    finally:
+        ac.set_capture_region(_orig_region)
 
 
 class _JumpTo(Exception):
@@ -439,7 +488,8 @@ class StepDialog(tk.Toplevel):
     def __init__(self, parent, step: dict | None = None):
         super().__init__(parent)
         self.title("新增步驟" if step is None else "編輯步驟")
-        self.resizable(False, False)
+        self.resizable(True, False)
+        self.minsize(560, 0)
         self.grab_set()
         self.result = None
 
@@ -522,6 +572,35 @@ class StepDialog(tk.Toplevel):
         tk.Checkbutton(self._color_center_frame,
                        text="自動點擊有顏色的位置（忽略白色背景）",
                        variable=self._click_color_var).pack(side=tk.LEFT, padx=(80, 0))
+
+        # ── 可切換群組：限定偵測區域 ──
+        self._step_region_frame = tk.Frame(self)
+        self._step_region_var = tk.BooleanVar(value=s.get("step_region_enabled", False))
+        tk.Checkbutton(self._step_region_frame, text="限定偵測區域",
+                       variable=self._step_region_var,
+                       command=self._on_step_region_toggle).pack(side=tk.LEFT, padx=(80, 0))
+        self._sr_detail = tk.Frame(self._step_region_frame)
+        for label, key, default in [("X", "step_region_x", 0), ("Y", "step_region_y", 0),
+                                     ("W", "step_region_w", 200), ("H", "step_region_h", 200)]:
+            tk.Label(self._sr_detail, text=label).pack(side=tk.LEFT, padx=(6, 2))
+            sp = tk.Spinbox(self._sr_detail, from_=0, to=9999, increment=10, width=6)
+            sp.delete(0, tk.END)
+            sp.insert(0, str(s.get(key, default)))
+            sp.pack(side=tk.LEFT)
+            setattr(self, f"_sr_{label.lower()}", sp)
+        tk.Label(self._sr_detail, text="（螢幕絕對座標）",
+                 fg="#888", font=("", 8)).pack(side=tk.LEFT, padx=4)
+
+        # ── 可切換群組：自動調降相似度 ──
+        self._auto_conf_frame = tk.Frame(self)
+        self._auto_conf_var = tk.BooleanVar(value=s.get("auto_confidence", False))
+        tk.Checkbutton(self._auto_conf_frame, text="失敗時自動調降相似度，最低降至",
+                       variable=self._auto_conf_var).pack(side=tk.LEFT, padx=(80, 0))
+        self._conf_min = tk.Spinbox(self._auto_conf_frame, from_=0.10, to=1.00,
+                                    increment=0.05, format="%.2f", width=7)
+        self._conf_min.delete(0, tk.END)
+        self._conf_min.insert(0, str(s.get("confidence_min", 0.5)))
+        self._conf_min.pack(side=tk.LEFT, padx=(4, 0))
 
         # ── 可切換群組：座標 X / Y ──
         self._coord_frame = tk.Frame(self)
@@ -671,6 +750,15 @@ class StepDialog(tk.Toplevel):
             hide(self._offset_frame)
             hide(self._color_center_frame)
 
+        # 限定偵測區域 + 自動調降相似度（圖片相關動作）
+        if action in _NEEDS_TEMPLATE:
+            show(self._step_region_frame)
+            self._on_step_region_toggle()
+            show(self._auto_conf_frame)
+        else:
+            hide(self._step_region_frame)
+            hide(self._auto_conf_frame)
+
         # 群組
         if action in _NEEDS_GROUP:
             show(self._group_frame)
@@ -688,6 +776,14 @@ class StepDialog(tk.Toplevel):
         self._on_fail_change()
 
         # 重新計算視窗大小
+        self.update_idletasks()
+        self.geometry("")
+
+    def _on_step_region_toggle(self):
+        if self._step_region_var.get():
+            self._sr_detail.pack(side=tk.LEFT)
+        else:
+            self._sr_detail.pack_forget()
         self.update_idletasks()
         self.geometry("")
 
@@ -834,11 +930,18 @@ class StepDialog(tk.Toplevel):
             "y":             int(self._y.get() or 0),
             "offset_x":           int(self._offset_x.get() or 0),
             "offset_y":           int(self._offset_y.get() or 0),
-            "click_color_center": self._click_color_var.get(),
-            "scroll_amount": int(self._scroll_amount.get() or 3),
-            "click_type":    DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
-            "folder":        self._folder.get().strip(),
-            "group":         self._group_var.get().strip(),
+            "click_color_center":  self._click_color_var.get(),
+            "scroll_amount":       int(self._scroll_amount.get() or 3),
+            "click_type":          DISPLAY_TO_CLICK_TYPE.get(self._click_type_var.get(), self._click_type_var.get()),
+            "folder":              self._folder.get().strip(),
+            "group":               self._group_var.get().strip(),
+            "step_region_enabled": self._step_region_var.get(),
+            "step_region_x":       int(self._sr_x.get() or 0),
+            "step_region_y":       int(self._sr_y.get() or 0),
+            "step_region_w":       int(self._sr_w.get() or 200),
+            "step_region_h":       int(self._sr_h.get() or 200),
+            "auto_confidence":     self._auto_conf_var.get(),
+            "confidence_min":      float(self._conf_min.get() or 0.5),
         }
         self.destroy()
 
@@ -1060,8 +1163,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pixel Pilot — 影像辨識自動化")
-        self.geometry("940x680")
-        self.minsize(700, 500)
+        cfg = load_config()
+        self.geometry(cfg.get("geometry", "1200x720"))
+        self.minsize(900, 560)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._steps: list[dict] = load_steps()
         self._stop_event = threading.Event()
@@ -1340,6 +1445,12 @@ class App(tk.Tk):
         ac.set_capture_region(None)
         self._win_var.set("（全螢幕）")
         self._win_status.config(text="")
+
+    def _on_close(self):
+        cfg = load_config()
+        cfg["geometry"] = self.winfo_geometry()
+        save_config(cfg)
+        self.destroy()
 
     def _save(self):
         save_steps(self._steps)
