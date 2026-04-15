@@ -14,6 +14,12 @@ import ctypes.wintypes
 from pathlib import Path
 import auto_clicker as ac
 
+# 支援 PyInstaller 打包：資料檔案相對於 exe 所在目錄
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = Path(sys.executable).parent
+else:
+    _BASE_DIR = Path(__file__).parent
+
 
 # ════════════════════════════════════════════════════════════
 #  Windows 視窗列舉（ctypes，無需額外安裝套件）
@@ -49,9 +55,9 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int]:
 #  常數
 # ════════════════════════════════════════════════════════════
 
-STEPS_FILE  = "steps.json"
-GROUPS_FILE = "groups.json"
-CONFIG_FILE = "config.json"
+STEPS_FILE  = str(_BASE_DIR / "steps.json")
+GROUPS_FILE = str(_BASE_DIR / "groups.json")
+CONFIG_FILE = str(_BASE_DIR / "config.json")
 
 
 def load_config() -> dict:

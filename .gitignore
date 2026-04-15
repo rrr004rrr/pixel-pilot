@@ -4,3 +4,10 @@ __pycache__/
 *.pyo
 .env
 venv/
+
+# PyInstaller
+build/
+dist/
+
+# Local config (window geometry)
+config.json
