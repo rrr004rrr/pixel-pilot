@@ -1180,6 +1180,16 @@ class App(tk.Tk):
 
         self._build_ui()
         self._refresh_tree()
+        cfg = load_config()
+        if cfg.get("win_resize_w"):
+            self._win_resize_w.delete(0, tk.END)
+            self._win_resize_w.insert(0, cfg["win_resize_w"])
+        if cfg.get("win_resize_h"):
+            self._win_resize_h.delete(0, tk.END)
+            self._win_resize_h.insert(0, cfg["win_resize_h"])
+        if cfg.get("topmost"):
+            self._topmost_var.set(True)
+            self.attributes("-topmost", True)
         self._refresh_windows()
 
     # ── 建構 UI ─────────────────────────────────────────────
@@ -1244,6 +1254,10 @@ class App(tk.Tk):
         tk.Button(ctrl, text="📦 群組管理", width=10,
                   command=lambda: GroupManagerDialog(self)).pack(side=tk.RIGHT, padx=6)
 
+        self._topmost_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ctrl, text="📌 置頂", variable=self._topmost_var,
+                       command=self._toggle_topmost).pack(side=tk.RIGHT, padx=6)
+
         # ── 視窗選擇器 ──
         win_box = tk.LabelFrame(self, text="目標視窗（鎖定後只截該視窗範圍）",
                                 padx=8, pady=4)
@@ -1260,6 +1274,15 @@ class App(tk.Tk):
 
         tk.Button(win_box, text="✕ 取消鎖定",
                   command=self._clear_window).pack(side=tk.LEFT, padx=6)
+
+        tk.Label(win_box, text="調整尺寸：").pack(side=tk.LEFT, padx=(12, 2))
+        self._win_resize_w = tk.Spinbox(win_box, from_=100, to=9999, width=5)
+        self._win_resize_w.pack(side=tk.LEFT)
+        tk.Label(win_box, text="×").pack(side=tk.LEFT, padx=2)
+        self._win_resize_h = tk.Spinbox(win_box, from_=100, to=9999, width=5)
+        self._win_resize_h.pack(side=tk.LEFT)
+        tk.Button(win_box, text="套用",
+                  command=self._resize_target_window).pack(side=tk.LEFT, padx=4)
 
         self._win_status = tk.Label(win_box, text="", fg="#2980b9")
         self._win_status.pack(side=tk.LEFT, padx=8)
@@ -1442,6 +1465,25 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("錯誤", f"無法取得視窗位置：{e}")
 
+    def _toggle_topmost(self):
+        self.attributes("-topmost", self._topmost_var.get())
+
+    def _resize_target_window(self):
+        """將目標視窗調整到指定寬×高，保留原本位置。"""
+        if not self._hwnd:
+            messagebox.showwarning("提示", "請先選擇目標視窗")
+            return
+        try:
+            w = int(self._win_resize_w.get())
+            h = int(self._win_resize_h.get())
+        except ValueError:
+            messagebox.showerror("錯誤", "請輸入有效的寬度與高度")
+            return
+        rect = get_window_rect(self._hwnd)
+        x, y = rect[0], rect[1]
+        ctypes.windll.user32.MoveWindow(self._hwnd, x, y, w, h, True)
+        self.after(150, self._apply_window_region)  # 等視窗重繪後更新截圖區域
+
     def _clear_window(self):
         self._hwnd = None
         ac.set_capture_region(None)
@@ -1451,6 +1493,9 @@ class App(tk.Tk):
     def _on_close(self):
         cfg = load_config()
         cfg["geometry"] = self.winfo_geometry()
+        cfg["win_resize_w"] = self._win_resize_w.get()
+        cfg["win_resize_h"] = self._win_resize_h.get()
+        cfg["topmost"] = self._topmost_var.get()
         save_config(cfg)
         self.destroy()
 
